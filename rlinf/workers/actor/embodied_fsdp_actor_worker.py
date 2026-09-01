@@ -460,28 +460,41 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         ).to(rollout_logprobs.dtype)
         clear_memory()
 
+        # Logprobs are per action token while the mask and the advantages are per
+        # action, the same layout preprocess_loss_inputs builds for the loss.
+        action_dim = self.cfg.actor.model.get("action_dim", 7)
+        log_ratio = (recomputed_logprobs - rollout_logprobs).reshape(
+            *rollout_logprobs.shape[:-1], -1, action_dim
+        )
         loss_mask = self.rollout_batch.get("loss_mask", None)
-        log_ratio = recomputed_logprobs - rollout_logprobs
+        mask = (
+            None
+            if loss_mask is None
+            else loss_mask.bool().unsqueeze(-1).expand_as(log_ratio)
+        )
         metrics = {
             "actor/rollout_train_logprob_gap": masked_mean(
-                log_ratio.abs(), mask=loss_mask
+                log_ratio.abs(), mask=mask
             ).item()
         }
+        if mask is not None:
+            metrics["actor/loss_mask_fraction"] = mask.float().mean().item()
 
         if self.cfg.algorithm.get("importance_sampling_fix", False):
             advantages = self.rollout_batch["advantages"]
-            assert advantages.ndim == log_ratio.ndim, (
-                f"advantages shape {tuple(advantages.shape)} and logprobs shape "
-                f"{tuple(log_ratio.shape)} must have the same rank for the "
-                "importance sampling fix to apply per token."
-            )
+            # An action's logprob is the sum over its dims, so its importance
+            # weight is the product of the per-dim ratios.
             is_weight = torch.clamp(
-                log_ratio.exp(),
+                log_ratio.sum(dim=-1).exp(),
                 max=self.cfg.algorithm.get("importance_sampling_clip", 2.0),
+            )
+            assert advantages.shape == is_weight.shape, (
+                f"advantages shape {tuple(advantages.shape)} must match the "
+                f"per-action importance weight shape {tuple(is_weight.shape)}."
             )
             self.rollout_batch["advantages"] = advantages * is_weight
             metrics["actor/importance_sampling_weight"] = masked_mean(
-                is_weight, mask=loss_mask
+                is_weight, mask=None if loss_mask is None else loss_mask.bool()
             ).item()
 
         self.rollout_batch["prev_logprobs"] = recomputed_logprobs
