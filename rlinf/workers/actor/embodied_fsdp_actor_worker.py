@@ -388,6 +388,105 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         teacher_model.to("cpu")
         clear_memory()
 
+    @Worker.timer("actor/recompute_logprobs")
+    def recompute_prev_logprobs(self) -> dict[str, float]:
+        """Recompute ``prev_logprobs`` with the actor's own training forward.
+
+        The rollout worker and the actor score the same action tokens through
+        different execution contexts (eval vs train mode, no autocast vs the
+        actor's AMP context, FSDP-gathered weights, different batch shapes), so
+        their logprobs differ even when the weights are identical. That
+        difference enters the PPO ratio, and the trust region gets spent on
+        numerics instead of on policy movement. Recomputing puts both ends of
+        the ratio on the same path; ``importance_sampling_fix`` then corrects
+        the advantages for the remaining rollout-to-actor gap.
+
+        Returns:
+            The rollout-to-actor logprob gap, and the importance sampling
+            weight when ``importance_sampling_fix`` is on.
+        """
+        assert SupportedModel(self.cfg.actor.model.model_type) in [
+            SupportedModel.OPENVLA,
+            SupportedModel.OPENVLA_OFT,
+        ], (
+            "algorithm.recompute_logprobs currently supports OpenVLA models; the "
+            "GR00T family already recomputes inside its training forward."
+        )
+        assert self.cfg.algorithm.adv_type != "opd", (
+            "algorithm.recompute_logprobs is not supported with OPD, whose "
+            "advantages are a teacher-student logprob difference."
+        )
+        assert "forward_inputs" in self.rollout_batch, (
+            "Recomputing logprobs requires rollout forward_inputs."
+        )
+
+        rollout_logprobs = self.rollout_batch["prev_logprobs"]
+        time_dim, batch_dim = rollout_logprobs.shape[:2]
+        flat_batch_size = time_dim * batch_dim
+        flat_forward_inputs = flatten_nested_tensor_time_batch(
+            self.rollout_batch["forward_inputs"], ("forward_inputs",)
+        )
+        num_chunks = (
+            flat_batch_size + self.cfg.actor.micro_batch_size - 1
+        ) // self.cfg.actor.micro_batch_size
+        kwargs = {
+            "temperature": self.cfg.rollout.sampling_params.temperature_train,
+            "top_k": self.cfg.rollout.sampling_params.top_k,
+        }
+
+        recomputed_logprobs = []
+        with torch.no_grad():
+            for micro_batch in split_dict_to_chunk(flat_forward_inputs, num_chunks):
+                micro_batch = put_tensor_device(micro_batch, self.device)
+                with self.amp_context:
+                    output = self.model(
+                        forward_inputs=micro_batch,
+                        compute_logprobs=True,
+                        compute_entropy=False,
+                        compute_values=False,
+                        use_cache=False,
+                        **kwargs,
+                    )
+                recomputed_logprobs.append(output["logprobs"].detach().cpu())
+
+        recomputed_logprobs = torch.cat(recomputed_logprobs, dim=0)
+        expected_shape = (flat_batch_size, *rollout_logprobs.shape[2:])
+        assert recomputed_logprobs.shape == expected_shape, (
+            f"recomputed logprobs shape {recomputed_logprobs.shape} must match "
+            f"flattened rollout logprobs shape {expected_shape}."
+        )
+        recomputed_logprobs = recomputed_logprobs.reshape(
+            time_dim, batch_dim, *recomputed_logprobs.shape[1:]
+        ).to(rollout_logprobs.dtype)
+        clear_memory()
+
+        loss_mask = self.rollout_batch.get("loss_mask", None)
+        log_ratio = recomputed_logprobs - rollout_logprobs
+        metrics = {
+            "actor/rollout_train_logprob_gap": masked_mean(
+                log_ratio.abs(), mask=loss_mask
+            ).item()
+        }
+
+        if self.cfg.algorithm.get("importance_sampling_fix", False):
+            advantages = self.rollout_batch["advantages"]
+            assert advantages.ndim == log_ratio.ndim, (
+                f"advantages shape {tuple(advantages.shape)} and logprobs shape "
+                f"{tuple(log_ratio.shape)} must have the same rank for the "
+                "importance sampling fix to apply per token."
+            )
+            is_weight = torch.clamp(
+                log_ratio.exp(),
+                max=self.cfg.algorithm.get("importance_sampling_clip", 2.0),
+            )
+            self.rollout_batch["advantages"] = advantages * is_weight
+            metrics["actor/importance_sampling_weight"] = masked_mean(
+                is_weight, mask=loss_mask
+            ).item()
+
+        self.rollout_batch["prev_logprobs"] = recomputed_logprobs
+        return metrics
+
     def _get_opd_teacher_model(self):
         if self._opd_teacher_model is None:
             teacher_model_config = build_expert_model_config(
@@ -504,6 +603,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
 
         self.model.train()
+        recompute_metrics = (
+            self.recompute_prev_logprobs()
+            if self.cfg.algorithm.get("recompute_logprobs", False)
+            else {}
+        )
         rollout_size = (
             self.rollout_batch["prev_logprobs"].shape[0]
             * self.rollout_batch["prev_logprobs"].shape[1]
@@ -525,6 +629,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             f"{rollout_size} is not divisible by {batch_size_per_rank}"
         )
         metrics = {}
+        if recompute_metrics:
+            append_to_dict(metrics, recompute_metrics)
         update_epoch = self.cfg.algorithm.get("update_epoch", 1)
         for _ in range(update_epoch):
             rollout_dataloader_iter = split_dict_to_chunk(

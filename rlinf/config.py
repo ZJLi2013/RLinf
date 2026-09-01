@@ -991,6 +991,12 @@ def validate_embodied_cfg(cfg):
                     "max_new_token", None
                 )
 
+    if not only_eval and algorithm_cfg.get("importance_sampling_fix", False):
+        assert algorithm_cfg.get("recompute_logprobs", False), (
+            "algorithm.importance_sampling_fix needs algorithm.recompute_logprobs "
+            "to provide the actor-side logprobs it corrects the advantages with."
+        )
+
     if not only_eval and cfg.runner.get("use_training_pipeline", False):
         assert cfg.algorithm.adv_type == "gae", (
             "algorithm.adv_type only supports 'gae' now"
