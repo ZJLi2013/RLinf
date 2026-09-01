@@ -389,7 +389,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         clear_memory()
 
     @Worker.timer("actor/recompute_logprobs")
-    def recompute_prev_logprobs(self) -> dict[str, float]:
+    def recompute_prev_logprobs(self, batch_size_per_rank: int) -> dict[str, float]:
         """Recompute ``prev_logprobs`` with the actor's own training forward.
 
         The rollout worker and the actor score the same action tokens through
@@ -398,8 +398,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         their logprobs differ even when the weights are identical. That
         difference enters the PPO ratio, and the trust region gets spent on
         numerics instead of on policy movement. Recomputing puts both ends of
-        the ratio on the same path; ``importance_sampling_fix`` then corrects
+        the ratio on the actor's path; ``importance_sampling_fix`` then corrects
         the advantages for the remaining rollout-to-actor gap.
+
+        Runs on the shuffled batch with the same two-level split the update loop
+        uses, so every sample is scored in the micro-batch it will be trained
+        in. Splitting it any other way leaves the two forwards disagreeing by
+        the bf16 noise of a different batch composition, which is the same
+        order as the rollout-to-actor gap itself.
+
+        Args:
+            batch_size_per_rank: Samples per optimizer step on this rank.
 
         Returns:
             The rollout-to-actor logprob gap, and the importance sampling
@@ -421,14 +430,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         )
 
         rollout_logprobs = self.rollout_batch["prev_logprobs"]
-        time_dim, batch_dim = rollout_logprobs.shape[:2]
-        flat_batch_size = time_dim * batch_dim
-        flat_forward_inputs = flatten_nested_tensor_time_batch(
-            self.rollout_batch["forward_inputs"], ("forward_inputs",)
-        )
-        num_chunks = (
-            flat_batch_size + self.cfg.actor.micro_batch_size - 1
-        ) // self.cfg.actor.micro_batch_size
+        rollout_size = rollout_logprobs.shape[0]
         kwargs = {
             "temperature": self.cfg.rollout.sampling_params.temperature_train,
             "top_k": self.cfg.rollout.sampling_params.top_k,
@@ -436,28 +438,32 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         recomputed_logprobs = []
         with torch.no_grad():
-            for micro_batch in split_dict_to_chunk(flat_forward_inputs, num_chunks):
-                micro_batch = put_tensor_device(micro_batch, self.device)
-                with self.amp_context:
-                    output = self.model(
-                        forward_inputs=micro_batch,
-                        compute_logprobs=True,
-                        compute_entropy=False,
-                        compute_values=False,
-                        use_cache=False,
-                        **kwargs,
-                    )
-                recomputed_logprobs.append(output["logprobs"].detach().cpu())
+            for global_batch in split_dict_to_chunk(
+                self.rollout_batch, rollout_size // batch_size_per_rank
+            ):
+                for micro_batch in split_dict_to_chunk(
+                    global_batch,
+                    batch_size_per_rank // self.cfg.actor.micro_batch_size,
+                ):
+                    micro_batch = put_tensor_device(micro_batch, self.device)
+                    with self.amp_context:
+                        output = self.model(
+                            forward_inputs=micro_batch["forward_inputs"],
+                            compute_logprobs=True,
+                            compute_entropy=False,
+                            compute_values=False,
+                            use_cache=False,
+                            **kwargs,
+                        )
+                    recomputed_logprobs.append(output["logprobs"].detach().cpu())
 
-        recomputed_logprobs = torch.cat(recomputed_logprobs, dim=0)
-        expected_shape = (flat_batch_size, *rollout_logprobs.shape[2:])
-        assert recomputed_logprobs.shape == expected_shape, (
-            f"recomputed logprobs shape {recomputed_logprobs.shape} must match "
-            f"flattened rollout logprobs shape {expected_shape}."
+        recomputed_logprobs = torch.cat(recomputed_logprobs, dim=0).to(
+            rollout_logprobs.dtype
         )
-        recomputed_logprobs = recomputed_logprobs.reshape(
-            time_dim, batch_dim, *recomputed_logprobs.shape[1:]
-        ).to(rollout_logprobs.dtype)
+        assert recomputed_logprobs.shape == rollout_logprobs.shape, (
+            f"recomputed logprobs shape {recomputed_logprobs.shape} must match "
+            f"rollout logprobs shape {rollout_logprobs.shape}."
+        )
         clear_memory()
 
         # Logprobs are per action token while the mask and the advantages are per
@@ -616,11 +622,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
 
         self.model.train()
-        recompute_metrics = (
-            self.recompute_prev_logprobs()
-            if self.cfg.algorithm.get("recompute_logprobs", False)
-            else {}
-        )
         rollout_size = (
             self.rollout_batch["prev_logprobs"].shape[0]
             * self.rollout_batch["prev_logprobs"].shape[1]
@@ -642,8 +643,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             f"{rollout_size} is not divisible by {batch_size_per_rank}"
         )
         metrics = {}
-        if recompute_metrics:
-            append_to_dict(metrics, recompute_metrics)
+        if self.cfg.algorithm.get("recompute_logprobs", False):
+            append_to_dict(metrics, self.recompute_prev_logprobs(batch_size_per_rank))
         update_epoch = self.cfg.algorithm.get("update_epoch", 1)
         for _ in range(update_epoch):
             rollout_dataloader_iter = split_dict_to_chunk(
