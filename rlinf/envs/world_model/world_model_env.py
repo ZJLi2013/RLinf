@@ -21,6 +21,7 @@ generates the frames and which reward model scores them.
 from __future__ import annotations
 
 import io
+import os
 from abc import abstractmethod
 from typing import Optional, Union
 
@@ -73,6 +74,13 @@ class WorldModelEnv(BaseWorldEnv):
         self.image_size = self.backend.image_size
 
         self.reward_model = self._load_reward_model().eval().to(self.device)
+
+        # predict_rew rounds before returning, so the probability that decides success is not
+        # observable from any metric. WM_DUMP_DIR writes it out for offline inspection.
+        self._dump_dir = os.environ.get("WM_DUMP_DIR") or None
+        self._dump_envs = int(os.environ.get("WM_DUMP_ENVS", "4"))
+        if self._dump_dir is not None:
+            os.makedirs(self._dump_dir, exist_ok=True)
 
         # Initialize state
         # Will be a tensor [num_envs, 3, 1, T, h, w]
@@ -417,7 +425,32 @@ class WorldModelEnv(BaseWorldEnv):
         else:
             rewards = self.reward_model.predict_rew(chunk_obs, instructions)
 
+        if self._dump_dir is not None:
+            self._dump_chunk_scores(chunk_obs, rewards)
+
         return rewards.reshape(self.num_envs, self.chunk)
+
+    def _dump_chunk_scores(self, chunk_obs, rewards):
+        """Write the pre-round reward-model probability and a few frames for one chunk."""
+        net = getattr(self.reward_model, "net", None)
+        if net is None:
+            return
+        with torch.no_grad():
+            probs = net(chunk_obs.clamp(-1.0, 1.0).to(dtype=torch.float32))
+
+        step = int(self.elapsed_steps.max().item())
+        payload = {
+            "probs": probs.reshape(self.num_envs, self.chunk).float().cpu().numpy(),
+            "rounded": rewards.reshape(self.num_envs, self.chunk).float().cpu().numpy(),
+            "reset_state_ids": self.reset_state_ids.cpu().numpy(),
+            "elapsed": np.asarray(step),
+        }
+        if self._dump_envs > 0:
+            frames = chunk_obs.reshape(self.num_envs, self.chunk, *chunk_obs.shape[1:])
+            frames = frames[: self._dump_envs].clamp(-1.0, 1.0)
+            payload["frames"] = ((frames + 1.0) * 127.5).to(torch.uint8).cpu().numpy()
+        path = os.path.join(self._dump_dir, f"chunk_{step:04d}_pid{os.getpid()}.npz")
+        np.savez_compressed(path, **payload)
 
     def _infer_next_chunk_frames(self, actions):
         """Advance the world model by one action chunk."""
