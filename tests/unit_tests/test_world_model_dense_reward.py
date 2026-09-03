@@ -52,7 +52,15 @@ def _load_env_module(monkeypatch):
 
 def _make_env(module, dense_reward):
     """Only the scoring attributes; _calc_step_reward touches nothing else."""
-    env = object.__new__(module.WorldModelEnv)
+
+    class _Env(module.WorldModelEnv):
+        def _build_backend(self):
+            raise AssertionError("these tests never generate frames")
+
+        def _load_reward_model(self):
+            raise AssertionError("these tests feed the probability in directly")
+
+    env = object.__new__(_Env)
     env.cfg = types.SimpleNamespace(reward_coef=COEF)
     env.device = torch.device("cpu")
     env.num_envs = NUM_ENVS
