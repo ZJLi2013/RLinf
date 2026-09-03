@@ -82,6 +82,16 @@ class WorldModelEnv(BaseWorldEnv):
         if self._dump_dir is not None:
             os.makedirs(self._dump_dir, exist_ok=True)
 
+        # Score the reward on the probability rather than the rounded label, so episodes that all
+        # fail still differ from each other. The success flag stays on the rounded label.
+        self.dense_reward = getattr(cfg, "dense_reward", False)
+        self._chunk_probs = None
+        if self.dense_reward and getattr(self.reward_model, "net", None) is None:
+            raise ValueError(
+                "dense_reward needs the pre-round probability, but "
+                f"{type(self.reward_model).__name__} exposes no `net` to call"
+            )
+
         # Initialize state
         # Will be a tensor [num_envs, 3, 1, T, h, w]
         self.current_obs = None
@@ -141,19 +151,24 @@ class WorldModelEnv(BaseWorldEnv):
 
     def _calc_step_reward(self, chunk_rewards):
         """Calculate step reward"""
+        scores = self._chunk_probs if self.dense_reward else chunk_rewards
         reward_diffs = torch.zeros(
             (self.num_envs, self.chunk), dtype=torch.float32, device=self.device
         )
         for i in range(self.chunk):
-            reward_diffs[:, i] = (
-                self.cfg.reward_coef * chunk_rewards[:, i] - self.prev_step_reward
-            )
-            self.prev_step_reward = self.cfg.reward_coef * chunk_rewards[:, i]
+            scaled = self.cfg.reward_coef * scores[:, i]
+            # A dense score is not monotone in progress: it peaks and falls back once the world
+            # model drifts out of the success pose. Carry the running peak so the episode return
+            # is coef * max(p) instead of coef * p_last.
+            if self.dense_reward:
+                scaled = torch.maximum(scaled, self.prev_step_reward)
+            reward_diffs[:, i] = scaled - self.prev_step_reward
+            self.prev_step_reward = scaled
 
         if self.use_rel_reward:
             return reward_diffs
         else:
-            return chunk_rewards
+            return scores
 
     def _estimate_success_from_rewards(self, chunk_rewards):
         """Estimate success (terminations) from the reward the world model predicts.
@@ -425,18 +440,28 @@ class WorldModelEnv(BaseWorldEnv):
         else:
             rewards = self.reward_model.predict_rew(chunk_obs, instructions)
 
+        self._chunk_probs = None
+        if self.dense_reward or self._dump_dir is not None:
+            self._chunk_probs = self._score_chunk_probs(chunk_obs)
         if self._dump_dir is not None:
             self._dump_chunk_scores(chunk_obs, rewards)
 
         return rewards.reshape(self.num_envs, self.chunk)
 
-    def _dump_chunk_scores(self, chunk_obs, rewards):
-        """Write the pre-round reward-model probability and a few frames for one chunk."""
+    def _score_chunk_probs(self, chunk_obs):
+        """The reward model's probability, i.e. what predict_rew rounds away."""
         net = getattr(self.reward_model, "net", None)
         if net is None:
-            return
+            return None
         with torch.no_grad():
             probs = net(chunk_obs.clamp(-1.0, 1.0).to(dtype=torch.float32))
+        return probs.reshape(self.num_envs, self.chunk).to(torch.float32)
+
+    def _dump_chunk_scores(self, chunk_obs, rewards):
+        """Write the pre-round reward-model probability and a few frames for one chunk."""
+        probs = self._chunk_probs
+        if probs is None:
+            return
 
         step = int(self.elapsed_steps.max().item())
         payload = {

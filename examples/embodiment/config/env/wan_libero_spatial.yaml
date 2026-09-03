@@ -11,6 +11,7 @@ max_episode_steps: 240 # max episode steps for truncation
 
 use_rel_reward: True
 reward_coef: 1.0
+dense_reward: False # score the reward model's probability instead of its rounded label
 
 # RLinf LiberoEnv specific settings
 reset_gripper_open: True
