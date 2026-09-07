@@ -371,6 +371,10 @@ class WorldModelEnv(BaseWorldEnv):
         else:
             self._restart_slots(target_slots, condition_windows)
 
+        # Reward models that read several chunks keep their own frame history.
+        if hasattr(self.reward_model, "reset_history"):
+            self.reward_model.reset_history(target_slots)
+
         # Each restarted slot's condition window as [C, 1, H, W] frames, from the axis tail.
         num_frames = self.current_obs.shape[3]
         init_frames = [

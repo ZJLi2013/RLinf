@@ -20,12 +20,16 @@ import os
 from typing import Optional
 
 from diffsynth.models.reward_model import ResnetRewModel, TaskEmbedResnetRewModel
+from omegaconf import OmegaConf
 
 from rlinf.envs.world_model.backend import WorldModelBackend
 from rlinf.envs.world_model.wan_backend import WanBackend
 from rlinf.envs.world_model.world_model_env import WorldModelEnv
 
 __all__ = ["WanEnv"]
+
+# Reward models that score against the episode's task, not the image alone.
+TASK_CONDITIONED_REWARD_MODELS = ("TaskEmbedResnetRewModel", "TOPRewardVLM")
 
 
 class WanEnv(WorldModelEnv):
@@ -40,10 +44,20 @@ class WanEnv(WorldModelEnv):
                 checkpoint_path=self.cfg.reward_model.from_pretrained,
                 task_suite_name=self.cfg.task_suite_name,
             )
+        elif self.cfg.reward_model.type == "TOPRewardVLM":
+            from rlinf.models.embodiment.reward.topreward_vlm_model import TOPRewardVLM
+
+            rm_cfg = OmegaConf.to_container(self.cfg.reward_model, resolve=True)
+            rm_cfg.pop("type")
+            return TOPRewardVLM(
+                model_path=rm_cfg.pop("from_pretrained"),
+                chunk=self.cfg.chunk,
+                **rm_cfg,
+            )
         raise ValueError(f"Unknown reward model type: {self.cfg.reward_model.type}")
 
     def _reward_instructions(self) -> Optional[list[str]]:
-        if self.cfg.reward_model.type != "TaskEmbedResnetRewModel":
+        if self.cfg.reward_model.type not in TASK_CONDITIONED_REWARD_MODELS:
             return None
         # One instruction per scored frame, so each description repeats over its chunk
         instructions = []
