@@ -76,6 +76,8 @@ class RecordVideo(gym.Wrapper):
         self.render_images: list[np.ndarray] = []
         self.video_cnt = 0
         self._num_envs = getattr(env, "num_envs", 1)
+        # Last frame of each env that has terminated, held for the rest of the video
+        self._frozen_frames: dict[int, np.ndarray] = {}
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._save_futures: list[Future] = []
 
@@ -324,12 +326,36 @@ class RecordVideo(gym.Wrapper):
                 )
                 for env_id, img in enumerate(images)
             ]
+        if self.video_cfg.get("freeze_terminated", True):
+            images = self._freeze_terminated(images, terminations)
         if len(images) > 1:
             nrows = int(np.sqrt(len(images)))
             full_image = tile_images(images, nrows=nrows)
             self.render_images.append(full_image)
         else:
             self.render_images.append(images[0])
+
+    def _freeze_terminated(
+        self, images: list[np.ndarray], terminations: Optional[Any]
+    ) -> list[np.ndarray]:
+        """Hold each terminated env on its final frame.
+
+        A slot that reached its goal keeps being stepped until the rollout ends, and
+        without this the video shows the policy wandering out of the goal pose long
+        after the episode's outcome was decided.
+        """
+        images = [
+            self._frozen_frames.get(env_id, img) for env_id, img in enumerate(images)
+        ]
+        if terminations is None:
+            return images
+        for env_id, img in enumerate(images):
+            if env_id in self._frozen_frames:
+                continue
+            value = self._value_for_env(terminations, env_id)
+            if value is not None and bool(np.asarray(value).any()):
+                self._frozen_frames[env_id] = img
+        return images
 
     def add_new_frames(
         self,
@@ -359,6 +385,12 @@ class RecordVideo(gym.Wrapper):
     def reset(self, *args, **kwargs):
         """Reset env and record the initial frame."""
         obs, info = self.env.reset(*args, **kwargs)
+        env_idx = kwargs.get("env_idx")
+        if env_idx is None:
+            self._frozen_frames.clear()
+        else:
+            for slot in np.atleast_1d(env_idx).tolist():
+                self._frozen_frames.pop(int(slot), None)
         self.add_new_frames(obs, info)
         return obs, info
 
@@ -459,6 +491,7 @@ class RecordVideo(gym.Wrapper):
         mp4_path = os.path.join(output_dir, f"{self.video_cnt}.mp4")
         frames = list(self.render_images)
         self.render_images = []
+        self._frozen_frames.clear()
         self.video_cnt += 1
         future = self._submit_save(frames, mp4_path)
         # Block until the encode + writer.close() returns so the MP4 is valid
