@@ -30,6 +30,20 @@ __all__ = ["WanEnv"]
 
 class WanEnv(WorldModelEnv):
     def _build_backend(self) -> WorldModelBackend:
+        backend = self.cfg.get("world_model", {}).get("backend", "wan")
+        if backend == "remote":
+            from rlinf.envs.sim.world_model.remote_backend import (
+                RemoteWorldModelBackend,
+            )
+
+            return RemoteWorldModelBackend(
+                self.cfg, self.device, self._get_runtime_device_str()
+            )
+        if backend != "wan":
+            raise ValueError(
+                f"world_model.backend={backend!r} is not served by this env; "
+                "expected wan or remote"
+            )
         return WanBackend(self.cfg, self.device, self._get_runtime_device_str())
 
     def _load_reward_model(self):
