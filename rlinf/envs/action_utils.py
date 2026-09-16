@@ -359,6 +359,10 @@ def prepare_actions(
                 raw_chunk_actions=raw_chunk_actions,
                 model_type=model_type,
             )
+        elif wm_env_type == "robotwin":
+            # The simulator takes these unchanged, so the world model standing in for
+            # it does too; the normalisation the backend needs is its own concern.
+            chunk_actions = raw_chunk_actions
         else:
             raise NotImplementedError(f"Env type {wm_env_type} not implemented")
     elif (

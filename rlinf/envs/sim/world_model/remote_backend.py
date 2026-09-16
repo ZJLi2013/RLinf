@@ -31,7 +31,6 @@ import http.client
 import io
 import json
 import time
-import urllib.error
 import urllib.request
 import uuid
 from typing import Any, Protocol, Sequence
