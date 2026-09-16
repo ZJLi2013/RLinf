@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Optional
 
 from diffsynth.models.reward_model import ResnetRewModel, TaskEmbedResnetRewModel
+from omegaconf import OmegaConf
 
 from rlinf.envs.sim.world_model.backend import WorldModelBackend
 from rlinf.envs.sim.world_model.wan_backend import WanBackend
@@ -38,6 +39,16 @@ class WanEnv(WorldModelEnv):
             return TaskEmbedResnetRewModel(
                 checkpoint_path=self.cfg.reward_model.from_pretrained,
                 task_suite_name=self.cfg.task_suite_name,
+            )
+        elif self.cfg.reward_model.type == "TOPRewardModel":
+            from rlinf.models.embodiment.reward.topreward_model import TOPRewardModel
+
+            rm_cfg = OmegaConf.to_container(self.cfg.reward_model, resolve=True)
+            rm_cfg.pop("type")
+            return TOPRewardModel(
+                model_path=rm_cfg.pop("from_pretrained"),
+                chunk=self.cfg.chunk,
+                **rm_cfg,
             )
         raise ValueError(f"Unknown reward model type: {self.cfg.reward_model.type}")
 
