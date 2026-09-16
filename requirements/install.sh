@@ -356,6 +356,30 @@ detect_rocm_version() {
     echo "$mm"
 }
 
+# Detect the ISA of the first GPU agent the ROCm stack reports (e.g. gfx942,
+# gfx1100). Prints it on success, returns 1 on failure. gfx000 is the CPU agent
+# and is skipped. Callers must treat failure as "keep the platform defaults".
+detect_amd_gfx_arch() {
+    local raw=""
+    if command -v rocminfo &>/dev/null; then
+        raw=$(rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | grep -v '^gfx000$' | head -n1)
+    fi
+    if [ -z "$raw" ] && command -v rocm_agent_enumerator &>/dev/null; then
+        raw=$(rocm_agent_enumerator 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | grep -v '^gfx000$' | head -n1)
+    fi
+    [ -z "$raw" ] && return 1
+    echo "$raw"
+}
+
+# Whether a gfx ISA belongs to CDNA, the compute-only Instinct line. These parts
+# carry no rasterization hardware, so Mesa's RADV cannot render on them.
+amd_gfx_is_cdna() {
+    case "$1" in
+        gfx908|gfx90a|gfx940|gfx941|gfx942|gfx950) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Find a torch version on the PyTorch wheel index that has a +rocm<rocm_ver>
 # Linux x86_64 wheel matching PYTHON_VERSION's cpXY tag. Prefers the smallest
 # version >= 2.5; falls back to the highest available wheel if no >= 2.5 wheel
@@ -590,11 +614,30 @@ configure_amd() {
     # deps in [project.dependencies] so [tool.uv.sources] mappings actually
     # take effect (uv only applies sources to direct deps).
     PLATFORM_TORCH_PACKAGES=("torch" "torchvision" "torchaudio" "pytorch-triton-rocm" "triton-rocm")
-    PLATFORM_VENV_EXPORTS=(
-        "export AMD_VULKAN_ICD=RADV"
-        "export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
-        "export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
-    )
+    # The Vulkan loader belongs to the ISA, not to the platform. RADV is right on
+    # RDNA, where the hardware driver is present and faster. On CDNA it enumerates
+    # the card as a supported discrete GPU and then fails once the renderer
+    # allocates a depth attachment, so those parts need Mesa's software
+    # rasterizer. All three variables matter: VK_DRIVER_FILES takes precedence
+    # over VK_ICD_FILENAMES, and AMD_VULKAN_ICD=RADV steers Mesa back to the
+    # hardware driver even when both paths point at lavapipe. Detection failure
+    # keeps the RADV defaults, i.e. the behavior shipped so far.
+    local gfx_arch=""
+    gfx_arch=$(detect_amd_gfx_arch) || gfx_arch=""
+    if [ -n "$gfx_arch" ] && amd_gfx_is_cdna "$gfx_arch"; then
+        echo "[install.sh] Detected CDNA (${gfx_arch}); pointing Vulkan at Mesa lavapipe."
+        PLATFORM_VENV_EXPORTS=(
+            "unset AMD_VULKAN_ICD"
+            "export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
+            "export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
+        )
+    else
+        PLATFORM_VENV_EXPORTS=(
+            "export AMD_VULKAN_ICD=RADV"
+            "export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+            "export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+        )
+    fi
     PLATFORM_FLASH_ATTN_INSTALL=1
     PLATFORM_FLASH_ATTN_PREBUILT=0
     PLATFORM_RELAX_TORCHCODEC=1
@@ -2833,26 +2876,37 @@ install_xsquare_turtle2_env() {
 }
 
 install_robotwin_env() {
-    # Set TORCH_CUDA_ARCH_LIST based on the CUDA version
-    local cuda_mm cuda_major cuda_minor
-    cuda_mm=$(detect_cuda_major_minor) || {
-        echo "Could not detect CUDA version. Cannot build robotwin environment." >&2
-        exit 1
-    }
-    cuda_major="${cuda_mm%% *}"
-    cuda_minor="${cuda_mm##* }"
-    if [ "$cuda_major" -gt 12 ] || { [ "$cuda_major" -eq 12 ] && [ "$cuda_minor" -ge 8 ]; }; then
-        # Include Blackwell support for CUDA 12.8+
-        export TORCH_CUDA_ARCH_LIST="7.0;8.0;9.0;10.0"
+    # pytorch3d, warp-lang and curobo are CUDA-only, and TORCH_CUDA_ARCH_LIST exists solely
+    # for them. RoboTwin itself runs without all three once the task config selects
+    # planner_backend=mplib, so only require CUDA on platforms that can build them.
+    local build_curobo_stack=0
+    if [ "$PLATFORM" = "nvidia" ]; then
+        build_curobo_stack=1
+        local cuda_mm cuda_major cuda_minor
+        cuda_mm=$(detect_cuda_major_minor) || {
+            echo "Could not detect CUDA version. Cannot build robotwin environment." >&2
+            exit 1
+        }
+        cuda_major="${cuda_mm%% *}"
+        cuda_minor="${cuda_mm##* }"
+        if [ "$cuda_major" -gt 12 ] || { [ "$cuda_major" -eq 12 ] && [ "$cuda_minor" -ge 8 ]; }; then
+            # Include Blackwell support for CUDA 12.8+
+            export TORCH_CUDA_ARCH_LIST="7.0;8.0;9.0;10.0"
+        else
+            export TORCH_CUDA_ARCH_LIST="7.0;8.0;9.0"
+        fi
     else
-        export TORCH_CUDA_ARCH_LIST="7.0;8.0;9.0"
+        echo "[install.sh] ${PLATFORM}: skipping pytorch3d/warp-lang/curobo (CUDA-only)."
+        echo "[install.sh] Set planner_backend: mplib in the task config; curobo is unavailable."
     fi
 
     uv pip install mplib==0.2.1 gymnasium==0.29.1 av open3d zarr openai
 
-    uv pip install git+${GITHUB_PREFIX}https://github.com/facebookresearch/pytorch3d.git@v0.7.9  --no-build-isolation
-    uv pip install warp-lang==1.11.1
-    uv pip install git+${GITHUB_PREFIX}https://github.com/NVlabs/curobo.git  --no-build-isolation
+    if [ "$build_curobo_stack" -eq 1 ]; then
+        uv pip install git+${GITHUB_PREFIX}https://github.com/facebookresearch/pytorch3d.git@v0.7.9  --no-build-isolation
+        uv pip install warp-lang==1.11.1
+        uv pip install git+${GITHUB_PREFIX}https://github.com/NVlabs/curobo.git  --no-build-isolation
+    fi
 
     # patch sapien and mplib for robotwin
     SAPIEN_LOCATION=$(uv pip show sapien | grep 'Location' | awk '{print $2}')/sapien
