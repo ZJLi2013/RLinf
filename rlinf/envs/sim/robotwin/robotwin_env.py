@@ -165,6 +165,7 @@ class RoboTwinEnv(gym.Env):
         batch_wrist_images = []
         batch_states = []
         batch_instructions = []
+        batch_endposes = []
         for obs in raw_obs:
             batch_images.append(
                 self.center_and_crop(obs["full_image"], center_crop=self.center_crop)
@@ -188,6 +189,8 @@ class RoboTwinEnv(gym.Env):
                 )
             batch_states.append(obs["state"])
             batch_instructions.append(obs["instruction"])
+            if obs.get("endpose") is not None:
+                batch_endposes.append(obs["endpose"])
 
         batch_images = torch.stack([torch.from_numpy(img) for img in batch_images])
         if len(batch_wrist_images) > 0:
@@ -195,12 +198,19 @@ class RoboTwinEnv(gym.Env):
         else:
             batch_wrist_images = None
         batch_states = torch.stack([torch.from_numpy(state) for state in batch_states])
+        if len(batch_endposes) > 0:
+            batch_endposes = torch.stack(
+                [torch.from_numpy(endpose) for endpose in batch_endposes]
+            )
+        else:
+            batch_endposes = None
 
         extracted_obs = {
             "main_images": batch_images,
             "wrist_images": batch_wrist_images,
             "states": batch_states,
             "task_descriptions": batch_instructions,
+            "endposes": batch_endposes,
         }
 
         return extracted_obs
