@@ -51,23 +51,18 @@ image_size: [256, 256]       # output image size of world model
 num_frames: 13               # total number of frames to encode = condition_frame_length + chunk
 
 world_model:
-  # Which backend advances frames. `wan` loads the pipeline in this process and uses the
-  # paths above; `remote` talks to a served world model and ignores them.
-  backend: wan
+  backend: wan                 # `remote` serves frames elsewhere and ignores the paths above
   remote:
     server_url: null
     model: nvidia/Cosmos3-Nano
+    transport: videos_sync     # `bwm_videos_sync` for Boundless World Model
     domain_name: libero
     num_inference_steps: 30
     fps: 5
-    # The first request for an output shape pays a kernel build, so only it gets the long
-    # timeout; a stuck steady-state step still surfaces as a failure.
     request_timeout_s: 300
-    warmup_timeout_s: 1800
-    # Retries are bounded by both, because an attempt count alone makes a step cost the sum
-    # of its timeouts and the env slots are stepped in turn.
+    warmup_timeout_s: 1800     # first request per output shape only; it pays a kernel build
     max_retries: 2
-    step_budget_s: 900
+    step_budget_s: 900         # wall-clock bound on a step, retry count is not enough
 
 reward_model:
   type: ResnetRewModel
