@@ -66,6 +66,20 @@ the lengths match.
 
 ## Mechanics that cost a round trip if missed
 
+- **Run Ruff before pushing, at the version the hooks pin.** `.pre-commit-config.yaml` pins
+  `ruff==0.14.3` and CI runs the same two commands, so run them locally:
+
+  ```bash
+  python -m ruff check --preview .
+  python -m ruff format --check .
+  ```
+
+  A linter failure on the PR costs a review round for something either command catches in seconds.
+
+- **Deleting code means re-checking its imports.** Removing the `__main__` blocks from the two
+  world-model env modules left `import os` unused in both — the only consumer had been
+  `os.environ.setdefault(...)` inside those blocks. `F401`, found by a reviewer rather than by us.
+
 - **Every commit needs `Signed-off-by`.** `git commit -s`, and the pre-commit `commit-msg` hook
   checks it: `pre-commit install --hook-type commit-msg`.
 - **Two approving reviews** are required, and code owners are auto-requested.
