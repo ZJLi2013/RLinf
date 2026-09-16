@@ -89,7 +89,16 @@ class RemoteWorldModelBackend:
         self.remote_cfg = cfg.world_model.remote
         self.max_retries = self.remote_cfg.get("max_retries", 2)
         self.step_budget_s = self.remote_cfg.get("step_budget_s", 900)
-        self._transport: WorldModelTransport = VideosSyncTransport(
+        name = self.remote_cfg.get("transport", "videos_sync")
+        transports = {
+            "videos_sync": VideosSyncTransport,
+            "bwm_videos_sync": BwmVideosSyncTransport,
+        }
+        if name not in transports:
+            raise ValueError(
+                f"unknown transport {name!r}; expected one of {sorted(transports)}"
+            )
+        self._transport: WorldModelTransport = transports[name](
             self.cfg, self.remote_cfg
         )
         self._sessions: dict[int, dict[str, Any]] = {}
@@ -340,6 +349,84 @@ class VideosSyncTransport:
             # The long budget is spent by waiting, not by attempting. A request that hung
             # for it does not get it again, or a dead endpoint would hold the slot for that
             # budget once per retry; a connection refused while the server boots keeps it.
+            if time.monotonic() - started >= self.timeout:
+                self._warm = True
+            raise
+        self._warm = True
+        return _decode_video(raw)
+
+
+class BwmVideosSyncTransport:
+    """Carries a step on the same one-shot endpoint, shaped for BWM.
+
+    BWM conditions on the whole window rather than a single frame, so the condition frames
+    ride as an mp4 in ``input_reference`` and the action spans history plus future. The
+    pipeline falls back to ``extra_args["action"]`` when ``multi_modal_data`` carries none,
+    which is what ``extra_params`` becomes server-side.
+    """
+
+    def __init__(self, cfg, remote_cfg):
+        self.url = remote_cfg.server_url.rstrip("/") + "/v1/videos/sync"
+        self.model = remote_cfg.model
+        self.timeout = remote_cfg.get("request_timeout_s", 300)
+        self.warmup_timeout = remote_cfg.get("warmup_timeout_s", 1800)
+        self.num_inference_steps = remote_cfg.get("num_inference_steps", 50)
+        self.fps = remote_cfg.get("fps", 24)
+        self.prompt = remote_cfg.get("prompt", "")
+        self.image_size = tuple(cfg.image_size)
+        self._warm = False
+
+    def open(self, session_id: str, task: Any, seed: int) -> None:
+        return None
+
+    def close(self, session_id: str) -> None:
+        return None
+
+    def step(
+        self,
+        session_id: str,
+        step_id: int,
+        cond_frames: np.ndarray,
+        actions: np.ndarray,
+        seed: int,
+        task: Any,
+    ) -> np.ndarray:
+        import imageio.v2 as imageio
+
+        # The latent grid is 4n+1 pixel frames. A window off that grid is truncated server-side
+        # without an error, so round up and carry the last action across the padding.
+        num_frames = 1 + ((actions.shape[0] - 1 + 3) // 4) * 4
+        if actions.shape[0] < num_frames:
+            pad = np.repeat(actions[-1:], num_frames - actions.shape[0], axis=0)
+            actions = np.concatenate([actions, pad], axis=0)
+
+        history = io.BytesIO()
+        writer = imageio.get_writer(history, format="mp4", fps=self.fps, quality=8)
+        for frame in cond_frames:
+            writer.append_data(frame)
+        writer.close()
+
+        h, w = self.image_size
+        fields = {
+            "model": self.model,
+            "prompt": task if isinstance(task, str) else self.prompt,
+            "input_reference": ("history.mp4", "video/mp4", history.getvalue()),
+            "size": f"{w}x{h}",
+            "num_frames": num_frames,
+            "fps": self.fps,
+            "num_inference_steps": self.num_inference_steps,
+            "guidance_scale": 1.0,
+            "extra_params": json.dumps(
+                {"action": [[float(x) for x in row] for row in actions]}
+            ),
+            "seed": seed,
+        }
+        timeout = self.timeout if self._warm else self.warmup_timeout
+        started = time.monotonic()
+        try:
+            raw = _post_multipart(self.url, fields, timeout)
+        except (OSError, http.client.HTTPException):
+            # Same warmup accounting as VideosSyncTransport.
             if time.monotonic() - started >= self.timeout:
                 self._warm = True
             raise
