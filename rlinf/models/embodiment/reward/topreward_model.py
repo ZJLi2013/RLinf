@@ -19,6 +19,7 @@ invented "is the task complete:" wording scored an unrelated instruction higher 
 correct one on the same frames. Needs transformers >= 4.57 for Qwen3-VL.
 """
 
+import sys
 from typing import Optional
 
 import numpy as np
@@ -26,6 +27,35 @@ import torch
 import torch.nn as nn
 
 from rlinf.models.embodiment.reward.rocm_patches import patch_vision_patch_embed
+
+
+def _import_layered_transformers(lib_dir: Optional[str]):
+    """Import a transformers that lives outside the interpreter's site-packages.
+
+    Qwen3-VL needs transformers >= 4.57, while the policies reachable from the same
+    launcher pin older lines -- OpenVLA-OFT to 4.40, and openpi to a 4.53.2 it patches
+    in place -- so the newer libs cannot go on a cluster-wide PYTHONPATH. Env workers
+    are their own processes, and a policy binds the transformers classes it uses at
+    import time, so shadowing the module here leaves those bindings intact while
+    everything imported afterwards resolves against the newer version.
+    """
+    if not lib_dir:
+        import transformers
+
+        return transformers
+
+    for name in [
+        name
+        for name in sys.modules
+        if name.split(".")[0] in ("transformers", "tokenizers")
+    ]:
+        del sys.modules[name]
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import transformers
+
+    return transformers
+
 
 PROMPT_PREFIX = (
     "The above video shows a robot manipulation trajectory that completes the "
@@ -47,6 +77,7 @@ class TOPRewardModel(nn.Module):
         success_prob_threshold: float = 0.46,
         window_frames: int = 16,
         fps: float = 2.0,
+        lib_dir: Optional[str] = None,
         attn_implementation: str = "eager",
         dtype: str = "bfloat16",
     ):
@@ -57,14 +88,12 @@ class TOPRewardModel(nn.Module):
         self.fps = float(fps)
         self._history: dict[int, np.ndarray] = {}
 
-        from transformers import AutoProcessor
+        transformers = _import_layered_transformers(lib_dir)
+        AutoVLM = getattr(transformers, "AutoModelForImageTextToText", None) or getattr(
+            transformers, "AutoModelForVision2Seq"
+        )
 
-        try:
-            from transformers import AutoModelForImageTextToText as AutoVLM
-        except ImportError:
-            from transformers import AutoModelForVision2Seq as AutoVLM
-
-        self.processor = AutoProcessor.from_pretrained(model_path)
+        self.processor = transformers.AutoProcessor.from_pretrained(model_path)
         self.model = AutoVLM.from_pretrained(
             model_path,
             dtype=getattr(torch, dtype),

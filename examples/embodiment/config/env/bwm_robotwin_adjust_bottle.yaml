@@ -73,3 +73,6 @@ reward_model:
   success_prob_threshold: 0.46
   window_frames: 16
   fps: 2.0
+  # Qwen3-VL needs transformers >= 4.57; openpi needs the 4.53.2 it patches in place.
+  # The scorer shadows sys.modules with this directory so both live in one launcher.
+  lib_dir: /data/zhengjli/rlinf/overlay-tf457
