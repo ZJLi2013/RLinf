@@ -25,6 +25,9 @@ from rlinf.envs.sim.world_model.world_model_env import WorldModelEnv
 
 __all__ = ["WanEnv"]
 
+# Scorers that read the task text; the plain ResNet takes frames alone.
+TASK_CONDITIONED_REWARDS = ("TaskEmbedResnetRewModel", "TOPRewardModel")
+
 
 class WanEnv(WorldModelEnv):
     def _build_backend(self) -> WorldModelBackend:
@@ -71,7 +74,7 @@ class WanEnv(WorldModelEnv):
         raise ValueError(f"Unknown reward model type: {self.cfg.reward_model.type}")
 
     def _reward_instructions(self) -> Optional[list[str]]:
-        if self.cfg.reward_model.type != "TaskEmbedResnetRewModel":
+        if self.cfg.reward_model.type not in TASK_CONDITIONED_REWARDS:
             return None
         # One instruction per scored frame, so each description repeats over its chunk
         instructions = []
