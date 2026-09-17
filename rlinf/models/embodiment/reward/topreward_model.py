@@ -19,6 +19,7 @@ invented "is the task complete:" wording scored an unrelated instruction higher 
 correct one on the same frames. Needs transformers >= 4.57 for Qwen3-VL.
 """
 
+import contextlib
 import sys
 from typing import Optional
 
@@ -29,32 +30,50 @@ import torch.nn as nn
 from rlinf.models.embodiment.reward.rocm_patches import patch_vision_patch_embed
 
 
-def _import_layered_transformers(lib_dir: Optional[str]):
-    """Import a transformers that lives outside the interpreter's site-packages.
+@contextlib.contextmanager
+def _layered_transformers(lib_dir: Optional[str]):
+    """Yield a transformers from outside the interpreter's site-packages, then put the
+    interpreter's own back.
 
     Qwen3-VL needs transformers >= 4.57, while the policies reachable from the same
     launcher pin older lines -- OpenVLA-OFT to 4.40, and openpi to a 4.53.2 it patches
-    in place -- so the newer libs cannot go on a cluster-wide PYTHONPATH. Env workers
-    are their own processes, and a policy binds the transformers classes it uses at
-    import time, so shadowing the module here leaves those bindings intact while
-    everything imported afterwards resolves against the newer version.
+    in place -- so the newer libs cannot go on a cluster-wide PYTHONPATH.
+
+    The swap is undone on the way out because a placement that colocates env and rollout
+    puts them in one process: a lingering sys.path entry sends the policy's later imports
+    to the newer version, where transformers reaches into accelerate and trips a circular
+    import. Classes the scorer already bound keep working, which is all it needs.
     """
     if not lib_dir:
         import transformers
 
-        return transformers
+        yield transformers
+        return
 
-    for name in [
-        name
-        for name in sys.modules
+    shadowed = {
+        name: module
+        for name, module in sys.modules.items()
         if name.split(".")[0] in ("transformers", "tokenizers")
-    ]:
+    }
+    for name in shadowed:
         del sys.modules[name]
-    if lib_dir not in sys.path:
+    inserted = lib_dir not in sys.path
+    if inserted:
         sys.path.insert(0, lib_dir)
-    import transformers
+    try:
+        import transformers
 
-    return transformers
+        yield transformers
+    finally:
+        if inserted and lib_dir in sys.path:
+            sys.path.remove(lib_dir)
+        for name in [
+            name
+            for name in sys.modules
+            if name.split(".")[0] in ("transformers", "tokenizers")
+        ]:
+            del sys.modules[name]
+        sys.modules.update(shadowed)
 
 
 PROMPT_PREFIX = (
@@ -88,17 +107,16 @@ class TOPRewardModel(nn.Module):
         self.fps = float(fps)
         self._history: dict[int, np.ndarray] = {}
 
-        transformers = _import_layered_transformers(lib_dir)
-        AutoVLM = getattr(transformers, "AutoModelForImageTextToText", None) or getattr(
-            transformers, "AutoModelForVision2Seq"
-        )
-
-        self.processor = transformers.AutoProcessor.from_pretrained(model_path)
-        self.model = AutoVLM.from_pretrained(
-            model_path,
-            dtype=getattr(torch, dtype),
-            attn_implementation=attn_implementation,
-        )
+        with _layered_transformers(lib_dir) as transformers:
+            AutoVLM = getattr(
+                transformers, "AutoModelForImageTextToText", None
+            ) or getattr(transformers, "AutoModelForVision2Seq")
+            self.processor = transformers.AutoProcessor.from_pretrained(model_path)
+            self.model = AutoVLM.from_pretrained(
+                model_path,
+                dtype=getattr(torch, dtype),
+                attn_implementation=attn_implementation,
+            )
         patch_vision_patch_embed(self.model)
         self.model.requires_grad_(False)
 
