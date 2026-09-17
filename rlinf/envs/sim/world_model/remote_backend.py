@@ -189,7 +189,15 @@ class RemoteWorldModelBackend:
             session = self._sessions[int(env_id)]
             cond = np.stack(session["frames"])
             frames = self._step_with_retry(session, windowed[row].numpy(), cond)
-            new_frames = frames[-self.chunk :]
+            # A transport that rounds the window up to the latent grid gets frames back for
+            # its padding too, so index from the front of the window rather than its end.
+            if frames.shape[0] < self.num_frames:
+                raise WorldModelUnavailable(
+                    f"served {frames.shape[0]} frames for a window of {self.num_frames}; "
+                    "a short clip means the request fell off the latent grid"
+                )
+            frames = frames[: self.num_frames]
+            new_frames = frames[self.condition_frame_length :]
             self._roll_forward(env_id, windowed[row], frames)
 
             video = new_frames.astype(np.float32) / 255.0 * 2.0 - 1.0
