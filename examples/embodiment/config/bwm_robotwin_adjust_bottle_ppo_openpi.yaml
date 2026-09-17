@@ -132,7 +132,9 @@ actor:
     action_dim: 14
     openpi:
       config_name: "pi0_aloha_robotwin"
-      num_images_in_input: 3
+      # One, not the simulator's three: the world model returns the head view only, and
+      # this is what tells the value head how many image token blocks are real.
+      num_images_in_input: 1
       detach_critic_input: True
 
   optim:
