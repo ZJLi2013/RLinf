@@ -82,6 +82,7 @@ class WorldModelEnv(BaseWorldEnv):
 
         self.reset_gripper_open = cfg.get("reset_gripper_open", True)
         self.is_libero_env = cfg.get("wm_env_type", "libero") == "libero"
+        self.state_dim = int(cfg.get("state_dim", 16))
 
         self.trans_norm = transforms.Compose(
             [
@@ -468,8 +469,12 @@ class WorldModelEnv(BaseWorldEnv):
         # Convert to uint8 tensor (keep as tensor, not numpy)
         full_image = full_image.to(torch.uint8)
 
-        # Get states (dummy for now, can be extended)
-        states = torch.zeros((num_envs, 16), device=self.device, dtype=torch.float32)
+        # The world model returns frames only, so there is no proprioception to report.
+        # The width still has to match what the policy reads: 16 for LIBERO, 14 for
+        # RoboTwin's two arms.
+        states = torch.zeros(
+            (num_envs, self.state_dim), device=self.device, dtype=torch.float32
+        )
 
         # Wrap observation - format aligned with libero_env
         obs = {

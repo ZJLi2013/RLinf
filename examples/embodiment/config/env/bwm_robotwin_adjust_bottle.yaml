@@ -59,6 +59,7 @@ enable_kir: False
 initial_image_path: /data/zhengjli/vomni/artifacts/init_frames/
 
 action_dim: 14
+state_dim: 14                # pi0 on RoboTwin reads two arms, not LIBERO's 16
 chunk: 50                    # same as num_action_chunks in pi0
 condition_frame_length: 9    # BWM's history window
 image_size: [480, 640]       # BWM's training resolution
