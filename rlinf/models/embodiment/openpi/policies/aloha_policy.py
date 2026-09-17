@@ -198,13 +198,14 @@ def _decode_aloha(data: dict, *, adapt_to_pi: bool = False) -> dict:
     # dim sizes: [6, 1, 6, 1]
     if "observation/state" in data:
         base_images = convert_image(data["observation/image"])
-        wrist_images = convert_image(data["observation/wrist_image"])
         state = np.asarray(data["observation/state"])
-        data["images"] = {
-            "cam_high": base_images,
-            "cam_left_wrist": wrist_images[0, ...],
-            "cam_right_wrist": wrist_images[1, ...],
-        }
+        data["images"] = {"cam_high": base_images}
+        # A world model standing in for the simulator returns the head view only, and
+        # AlohaInputs already blacks out and masks off whatever camera it is not given.
+        if data.get("observation/wrist_image") is not None:
+            wrist_images = convert_image(data["observation/wrist_image"])
+            data["images"]["cam_left_wrist"] = wrist_images[0, ...]
+            data["images"]["cam_right_wrist"] = wrist_images[1, ...]
     else:
         images = data["images"]
         images_dict = {name: convert_image(img) for name, img in images.items()}
