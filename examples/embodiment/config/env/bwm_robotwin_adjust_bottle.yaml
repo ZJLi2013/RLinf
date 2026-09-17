@@ -46,6 +46,12 @@ world_model:
     warmup_timeout_s: 1800
     max_retries: 2
     step_budget_s: 900
+    # The env identifies episodes by index, so the prompt comes from here. This is the
+    # wording BWM's own adjust_bottle demo ships with; a single-task run needs no more.
+    prompt: >-
+      In a fixed robotic workspace, generate a rigid, physically consistent embodied
+      robotic arm. The arm maintains high stability with no deformation and enters the
+      frame to Lift the narrow-necked bottle using the right arm and hold upright
 
 # No KIR: the init-frame dataset holds one reset observation per episode, so the reference
 # frame fills the condition window on its own.

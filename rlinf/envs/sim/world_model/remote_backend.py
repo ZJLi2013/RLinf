@@ -414,9 +414,17 @@ class BwmVideosSyncTransport:
         writer.close()
 
         h, w = self.image_size
+        prompt = task if isinstance(task, str) else self.prompt
+        if not prompt:
+            # An empty multipart field reads as absent server-side, so the 400 that comes
+            # back names the prompt rather than the config that failed to set it.
+            raise ValueError(
+                "no prompt for the served world model: the env identifies episodes by "
+                "index, so world_model.remote.prompt has to carry the task wording"
+            )
         fields = {
             "model": self.model,
-            "prompt": task if isinstance(task, str) else self.prompt,
+            "prompt": prompt,
             "input_reference": ("history.mp4", "video/mp4", history.getvalue()),
             "size": f"{w}x{h}",
             "num_frames": num_frames,
