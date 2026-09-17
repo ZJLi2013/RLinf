@@ -1,0 +1,68 @@
+env_type: wan_wm
+task_suite_name: robotwin_adjust_bottle
+wm_env_type: robotwin
+
+total_num_envs: null
+
+auto_reset: False
+ignore_terminations: False
+max_steps_per_rollout_epoch: 200
+max_episode_steps: 200 # max episode steps for truncation
+
+use_rel_reward: True
+reward_coef: 1.0
+
+# RoboTwin's gripper resets closed at 1.0 rather than LIBERO's open at -1, and the
+# condition action turned out not to move BWM's output, so the window keeps its zeros.
+reset_gripper_open: False
+is_eval: False
+
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: True
+use_ordered_reset_state_ids: False
+specific_reset_id: null
+
+video_cfg:
+  save_video: True
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+enable_offload: False
+
+###  ------------------ BWM params define here ------------------
+
+# BWM is served rather than loaded in-process: it needs python 3.12 and vllm-omni, while
+# the env worker runs RoboTwin's 3.11 stack.
+world_model:
+  backend: remote
+  remote:
+    transport: bwm_videos_sync
+    server_url: http://127.0.0.1:8010
+    model: /data/zhengjli/vomni/models/BWM
+    num_inference_steps: 50
+    fps: 24
+    request_timeout_s: 600
+    warmup_timeout_s: 1800
+    max_retries: 2
+    step_budget_s: 900
+
+# No KIR: the init-frame dataset holds one reset observation per episode, so the reference
+# frame fills the condition window on its own.
+enable_kir: False
+initial_image_path: /data/zhengjli/vomni/artifacts/init_frames/
+
+action_dim: 14
+chunk: 50                    # same as num_action_chunks in pi0
+condition_frame_length: 9    # BWM's history window
+image_size: [480, 640]       # BWM's training resolution
+num_frames: 59               # condition_frame_length + chunk
+
+reward_model:
+  # The per-suite ResNet does not exist for RoboTwin, and the frozen VLM scored generated
+  # frames here at VOC 0.794 with the LIBERO threshold intact.
+  type: TOPRewardModel
+  from_pretrained: /data/zhengjli/rlinf/ckpt/qwen3-vl-8b-instruct
+  success_prob_threshold: 0.46
+  window_frames: 16
+  fps: 2.0

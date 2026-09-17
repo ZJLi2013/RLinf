@@ -18,11 +18,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from diffsynth.models.reward_model import ResnetRewModel, TaskEmbedResnetRewModel
 from omegaconf import OmegaConf
 
 from rlinf.envs.sim.world_model.backend import WorldModelBackend
-from rlinf.envs.sim.world_model.wan_backend import WanBackend
 from rlinf.envs.sim.world_model.world_model_env import WorldModelEnv
 
 __all__ = ["WanEnv"]
@@ -42,12 +40,20 @@ class WanEnv(WorldModelEnv):
                 f"world_model.backend={backend!r} is not served by this env; "
                 "expected wan or remote"
             )
+        from rlinf.envs.sim.world_model.wan_backend import WanBackend
+
         return WanBackend(self.cfg, self._get_runtime_device())
 
     def _load_reward_model(self):
+        # diffsynth ships the Wan pipeline alongside these scorers, so a served backend
+        # would otherwise need it installed just to reach the reward model it does use.
         if self.cfg.reward_model.type == "ResnetRewModel":
+            from diffsynth.models.reward_model import ResnetRewModel
+
             return ResnetRewModel(self.cfg.reward_model.from_pretrained)
         elif self.cfg.reward_model.type == "TaskEmbedResnetRewModel":
+            from diffsynth.models.reward_model import TaskEmbedResnetRewModel
+
             return TaskEmbedResnetRewModel(
                 checkpoint_path=self.cfg.reward_model.from_pretrained,
                 task_suite_name=self.cfg.task_suite_name,
