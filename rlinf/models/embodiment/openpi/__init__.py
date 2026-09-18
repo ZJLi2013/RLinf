@@ -13,11 +13,14 @@
 # limitations under the License.
 # openpi model configs
 
+import logging
 import os
 import pathlib
 
 import torch
 from omegaconf import DictConfig
+
+logger = logging.getLogger(__name__)
 
 
 def get_model(cfg: DictConfig, torch_dtype=None):
@@ -85,7 +88,19 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         for weight_path in weight_paths:
             state_dict = safetensors.torch.load_file(weight_path, device="cpu")
             all_state_dict.update(state_dict)
-        model.load_state_dict(all_state_dict, strict=False)
+        incompatible = model.load_state_dict(all_state_dict, strict=False)
+        # Loading is deliberately non-strict, so a checkpoint from the other Pi0 variant
+        # goes in quietly and leaves whole modules at their random initialisation.
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            logger.warning(
+                "%s: %d parameters the model expects are not in the checkpoint and %d in "
+                "the checkpoint have nowhere to go. Missing e.g. %s; unexpected e.g. %s",
+                checkpoint_dir,
+                len(incompatible.missing_keys),
+                len(incompatible.unexpected_keys),
+                incompatible.missing_keys[:3],
+                incompatible.unexpected_keys[:3],
+            )
 
     model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     # fsdp replace
