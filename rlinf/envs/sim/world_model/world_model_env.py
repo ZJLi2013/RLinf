@@ -225,6 +225,12 @@ class WorldModelEnv(BaseWorldEnv):
 
         if self.reset_gripper_open and self.is_libero_env:
             env_condition_action[:, -1] = -1
+        elif self.action_bridge is not None:
+            # Zero is the middle of the world model's normalised pose range, not "no
+            # motion", so an all-zero prefix claims the arm was parked mid-workspace.
+            rest = np.zeros(action_dim, dtype=np.float32)
+            rest[[6, 13]] = 0.0 if self.reset_gripper_open else 1.0
+            env_condition_action[:] = self.action_bridge(rest)
 
         # KIR trick: use the last four frames as condition frames, while
         # keeping the reference frame unchanged as the first frame.

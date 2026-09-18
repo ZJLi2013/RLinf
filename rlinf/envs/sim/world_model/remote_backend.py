@@ -79,6 +79,10 @@ class RemoteWorldModelBackend:
         self.num_frames = cfg.num_frames
         self.image_size = tuple(cfg.image_size)
         self.retain_action = cfg.get("retain_action", True)
+        # An image-to-video model anchors on its first frame, so that slot holds the reset
+        # frame for the whole episode. A model conditioned on a stretch of video wants the
+        # window contiguous instead, and pinning slot 0 puts a time jump inside it.
+        self.retain_reference_frame = cfg.get("retain_reference_frame", True)
         if self.num_frames != self.condition_frame_length + self.chunk:
             raise ValueError(
                 f"num_frames must be condition_frame_length + chunk; got {self.num_frames} != "
@@ -152,10 +156,11 @@ class RemoteWorldModelBackend:
     ) -> None:
         """Advance a session's window and action history. Only called after a success."""
         session = self._sessions[int(env_id)]
-        keep = self.condition_frame_length - 1
-        session["frames"][1:] = list(frames[-keep:])
+        start = 1 if self.retain_reference_frame else 0
+        keep = self.condition_frame_length - start
+        session["frames"][start:] = list(frames[-keep:])
         tail = windowed[-keep:, :]
-        session["actions"][1 : self.condition_frame_length] = tail.to(
+        session["actions"][start : self.condition_frame_length] = tail.to(
             dtype=session["actions"].dtype
         )
         session["step_id"] += 1

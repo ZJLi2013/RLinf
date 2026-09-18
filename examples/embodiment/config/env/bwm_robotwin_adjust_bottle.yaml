@@ -72,6 +72,9 @@ action_bridge:
   swap_arm_blocks: true
 chunk: 50                    # same as num_action_chunks in pi0
 condition_frame_length: 9    # BWM's history window
+# BWM conditions on a stretch of video rather than anchoring on a reference image, so the
+# window rolls whole instead of pinning slot 0 to the reset frame.
+retain_reference_frame: False
 image_size: [480, 640]       # BWM's training resolution
 num_frames: 59               # condition_frame_length + chunk
 
