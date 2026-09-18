@@ -48,17 +48,26 @@ _FINGERPRINT_KEYS = (
 )
 
 
-def _weight_fingerprint(model):
-    """Mean and std of a few parameters, to tell a real sync from a silent no-op."""
+def _weight_fingerprint(model, tag=""):
+    """Whole-model checksum plus a few named tensors, printed where the driver log sees it."""
     if not os.environ.get("RLINF_WM_TRACE"):
         return None
     state = model.state_dict()
-    out = {}
+    total = 0.0
+    count = 0
+    for tensor in state.values():
+        if torch.is_floating_point(tensor):
+            total += float(tensor.detach().float().abs().sum())
+            count += tensor.numel()
+    out = {"__all__": f"n={count} sum|w|={total:.3f}"}
     for key in _FINGERPRINT_KEYS:
         tensor = state.get(key)
         if tensor is not None:
             tensor = tensor.detach().float()
             out[key] = f"mean={tensor.mean():.6f} std={tensor.std():.6f}"
+    if tag:
+        for key, value in out.items():
+            print(f"[weights {tag}] {key}: {value}", flush=True)
     return out
 
 
@@ -169,6 +178,7 @@ class MultiStepRolloutWorker(Worker):
             rollout_model_config.model_path = self.cfg.rollout.model.model_path
 
         self.hf_model: BasePolicy = get_model(rollout_model_config)
+        _weight_fingerprint(self.hf_model, tag="loaded")
 
         if self.cfg.runner.get("ckpt_path", None):
             model_dict = torch.load(self.cfg.runner.ckpt_path)
@@ -687,13 +697,9 @@ class MultiStepRolloutWorker(Worker):
                 send=send_func,
             )
 
-        before = _weight_fingerprint(self.hf_model)
+        _weight_fingerprint(self.hf_model, tag="before-sync")
         applied_version = await self.weight_syncer.apply(self.hf_model, recv_func)
-        after = _weight_fingerprint(self.hf_model)
-        if before is not None:
-            for key in before:
-                if before[key] != after[key]:
-                    self.log_info(f"[sync] {key}: {before[key]} -> {after[key]}")
+        _weight_fingerprint(self.hf_model, tag="after-sync")
         self.version = applied_version
         if self.finished_episodes is None:
             self.finished_episodes = (
