@@ -94,6 +94,12 @@ class WorldModelEnv(BaseWorldEnv):
             from rlinf.envs.sim.world_model.robotwin_action_bridge import get_bridge
 
             self.action_bridge = get_bridge(bridge_cfg)
+        # Before the first chunk there is no command to echo, and a state-conditioned policy
+        # reads all-zero as a pose rather than as "unknown". Start it at the reset pose.
+        self._rest_action = np.zeros(int(cfg.get("action_dim", DEFAULT_ACTION_DIM)),
+                                     dtype=np.float32)
+        if self.action_bridge is not None:
+            self._rest_action[[6, 13]] = 0.0 if cfg.get("reset_gripper_open", True) else 1.0
         self._last_policy_action = None
 
         self.trans_norm = transforms.Compose(
@@ -455,10 +461,12 @@ class WorldModelEnv(BaseWorldEnv):
         if os.environ.get("RLINF_WM_TRACE"):
             a = np.asarray(actions, dtype=np.float32)
             v = videos.detach().float().cpu().numpy()
+            raw = np.asarray(self._last_policy_action, dtype=np.float32)
             print(
                 f"[wm-trace] step={int(self._elapsed_steps.max())} "
                 f"act shape={a.shape} range=[{a.min():.3f}, {a.max():.3f}] "
                 f"mean={a.mean():.3f} clip={np.mean(np.abs(a) >= 0.999):.2f} | "
+                f"joint range=[{raw.min():.3f}, {raw.max():.3f}] | "
                 f"frames {tuple(v.shape)} mean={v.mean():.3f} std={v.std():.3f}",
                 flush=True,
             )
@@ -506,14 +514,17 @@ class WorldModelEnv(BaseWorldEnv):
         # command, which is what the RoboTwin policies were trained to consume; before the
         # first chunk there is nothing to echo. Width matches the policy: 16 for LIBERO,
         # 14 for RoboTwin's two arms.
+        echoed = self._last_policy_action
+        if echoed is None:
+            echoed = np.broadcast_to(self._rest_action, (num_envs, len(self._rest_action)))
+        echoed = torch.as_tensor(
+            np.ascontiguousarray(echoed), device=self.device, dtype=torch.float32
+        )
         states = torch.zeros(
             (num_envs, self.state_dim), device=self.device, dtype=torch.float32
         )
-        if self._last_policy_action is not None:
-            echoed = torch.as_tensor(
-                self._last_policy_action, device=self.device, dtype=torch.float32
-            )
-            states[:, : echoed.shape[-1]] = echoed[:, : self.state_dim]
+        width = min(self.state_dim, echoed.shape[-1])
+        states[:, :width] = echoed[:, :width]
 
         # Wrap observation - format aligned with libero_env
         obs = {
