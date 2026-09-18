@@ -126,16 +126,26 @@ actor:
   enable_offload: True
 
   model:
-    model_path: "/data/zhengjli/ckpt/RLinf-Pi0-RoboTwin-SFT-adjust_bottle"
+    # WorldArena Track 2's single-view checkpoint, the only RoboTwin policy whose
+    # observation contract matches a one-view world model. It is pi0.5, not pi0.
+    model_path: "/data/zhengjli/vomni/track2/ckpt/fulldata"
     num_action_chunks: 50 # must equal env.train.chunk
     add_value_head: True
     action_dim: 14
+    # WorldModelEnv echoes the policy's own last command back as `states`, which is what
+    # the Track 2 rollout feeds its policy.
+    use_proprio: True
     openpi:
-      config_name: "pi0_aloha_robotwin"
+      config_name: "pi05_aloha_robotwin"
       # One, not the simulator's three: the world model returns the head view only, and
       # this is what tells the value head how many image token blocks are real.
       num_images_in_input: 1
       detach_critic_input: True
+    openpi_data:
+      # pi05_aloha_robotwin leaves this at the default, which flips the sign of two joints
+      # per arm; these weights are trained in RoboTwin's own convention, like pi0_aloha_robotwin.
+      adapt_to_pi: false
+      norm_stats_path: "/data/zhengjli/vomni/track2/ckpt/fulldata/assets/robotwin_clean"
 
   optim:
     lr: 5.6e-6

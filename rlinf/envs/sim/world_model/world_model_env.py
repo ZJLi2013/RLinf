@@ -84,6 +84,16 @@ class WorldModelEnv(BaseWorldEnv):
         self.is_libero_env = cfg.get("wm_env_type", "libero") == "libero"
         self.state_dim = int(cfg.get("state_dim", 16))
 
+        # The policy speaks joint angles while BWM was trained on end-effector poses.
+        bridge_cfg = cfg.get("action_bridge", None)
+        if bridge_cfg is None:
+            self.action_bridge = None
+        else:
+            from rlinf.envs.sim.world_model.robotwin_action_bridge import get_bridge
+
+            self.action_bridge = get_bridge(bridge_cfg)
+        self._last_policy_action = None
+
         self.trans_norm = transforms.Compose(
             [
                 transforms.Normalize(
@@ -427,6 +437,10 @@ class WorldModelEnv(BaseWorldEnv):
             f"Actions shape {actions.shape} does not match num_envs {self.num_envs}"
         )
 
+        self._last_policy_action = actions[:, -1]
+        if self.action_bridge is not None:
+            actions = self.action_bridge(actions)
+
         # The new frames only, [num_envs, C, T, H, W] in [-1, 1]; T follows the model.
         videos = self.backend.generate(env_ids=range(num_envs), actions=actions)
 
@@ -469,12 +483,18 @@ class WorldModelEnv(BaseWorldEnv):
         # Convert to uint8 tensor (keep as tensor, not numpy)
         full_image = full_image.to(torch.uint8)
 
-        # The world model returns frames only, so there is no proprioception to report.
-        # The width still has to match what the policy reads: 16 for LIBERO, 14 for
-        # RoboTwin's two arms.
+        # The world model returns frames only. What the policy reads back is its own last
+        # command, which is what the RoboTwin policies were trained to consume; before the
+        # first chunk there is nothing to echo. Width matches the policy: 16 for LIBERO,
+        # 14 for RoboTwin's two arms.
         states = torch.zeros(
             (num_envs, self.state_dim), device=self.device, dtype=torch.float32
         )
+        if self._last_policy_action is not None:
+            echoed = torch.as_tensor(
+                self._last_policy_action, device=self.device, dtype=torch.float32
+            )
+            states[:, : echoed.shape[-1]] = echoed[:, : self.state_dim]
 
         # Wrap observation - format aligned with libero_env
         obs = {
