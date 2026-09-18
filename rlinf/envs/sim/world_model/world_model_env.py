@@ -24,6 +24,8 @@ import io
 from abc import abstractmethod
 from typing import Optional, Union
 
+import os
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -449,6 +451,17 @@ class WorldModelEnv(BaseWorldEnv):
 
         # The new frames only, [num_envs, C, T, H, W] in [-1, 1]; T follows the model.
         videos = self.backend.generate(env_ids=range(num_envs), actions=actions)
+
+        if os.environ.get("RLINF_WM_TRACE"):
+            a = np.asarray(actions, dtype=np.float32)
+            v = videos.detach().float().cpu().numpy()
+            print(
+                f"[wm-trace] step={int(self._elapsed_steps.max())} "
+                f"act shape={a.shape} range=[{a.min():.3f}, {a.max():.3f}] "
+                f"mean={a.mean():.3f} clip={np.mean(np.abs(a) >= 0.999):.2f} | "
+                f"frames {tuple(v.shape)} mean={v.mean():.3f} std={v.std():.3f}",
+                flush=True,
+            )
 
         # Reshape to match current_obs format: [num_envs, C, 1, T, H, W]
         x_samples = videos.unsqueeze(2).to(self.device, dtype=self.current_obs.dtype)
