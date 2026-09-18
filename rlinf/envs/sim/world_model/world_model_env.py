@@ -391,7 +391,9 @@ class WorldModelEnv(BaseWorldEnv):
             init_actions=torch.stack(
                 [window[1] for window in condition_windows], dim=0
             ).to(self.device),
-            task_ids=list(episode_indices),
+            # The served model conditions on text, so each session carries its own episode's
+            # wording. A fixed prompt only matches when every episode shares one task.
+            task_ids=[self.task_descriptions[slot] for slot in target_slots],
             seeds=[0] * num_slots,
         )
 

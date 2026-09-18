@@ -46,8 +46,8 @@ world_model:
     warmup_timeout_s: 1800
     max_retries: 2
     step_budget_s: 900
-    # The env identifies episodes by index, so the prompt comes from here. This is the
-    # wording BWM's own adjust_bottle demo ships with; a single-task run needs no more.
+    # Fallback only: each session sends its own episode's wording, since the init-frame set
+    # carries one instruction per episode and they do not all name the same arm.
     prompt: >-
       In a fixed robotic workspace, generate a rigid, physically consistent embodied
       robotic arm. The arm maintains high stability with no deformation and enters the
