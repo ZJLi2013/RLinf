@@ -527,6 +527,16 @@ class WorldModelEnv(BaseWorldEnv):
         states[:, :width] = echoed[:, :width]
 
         # Wrap observation - format aligned with libero_env
+        if os.environ.get("RLINF_WM_TRACE"):
+            s0 = states[0].detach().cpu().numpy()
+            print(
+                f"[wm-obs] step={int(self._elapsed_steps.max())} "
+                f"img {tuple(full_image.shape)} mean={full_image.float().mean():.1f} "
+                f"| state [{s0.min():.3f}, {s0.max():.3f}] {np.round(s0, 3).tolist()} "
+                f"| task={self.task_descriptions[0]!r}",
+                flush=True,
+            )
+
         obs = {
             "main_images": full_image,  # [num_envs, H, W, 3]
             "wrist_images": None,  # Not available in world model
