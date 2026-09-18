@@ -536,6 +536,17 @@ class WorldModelEnv(BaseWorldEnv):
                 f"| task={self.task_descriptions[0]!r}",
                 flush=True,
             )
+            dump = os.environ.get("RLINF_WM_DUMP")
+            if dump:
+                path = f"{dump}/obs_step{int(self._elapsed_steps.max()):04d}.npz"
+                if not os.path.exists(path):
+                    os.makedirs(dump, exist_ok=True)
+                    np.savez(
+                        path,
+                        image=full_image[0].detach().cpu().numpy(),
+                        state=s0,
+                        task=np.array(self.task_descriptions[0]),
+                    )
 
         obs = {
             "main_images": full_image,  # [num_envs, H, W, 3]
