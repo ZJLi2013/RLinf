@@ -14,6 +14,7 @@
 
 import asyncio
 import copy
+import os
 import gc
 import time
 from typing import Any, Callable, Literal, Optional
@@ -36,6 +37,29 @@ from rlinf.models.embodiment.base_policy import BasePolicy
 from rlinf.scheduler import Channel, Cluster, Worker, split_channel_message
 from rlinf.utils.obs_compression import decompress_obs, infer_obs_batch_size
 from rlinf.utils.placement import HybridComponentPlacement
+
+
+_FINGERPRINT_KEYS = (
+    "action_in_proj.weight",
+    "action_out_proj.weight",
+    "paligemma_with_expert.paligemma.lm_head.weight",
+    "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight",
+    "paligemma_with_expert.gemma_expert.model.layers.0.input_layernorm.dense.weight",
+)
+
+
+def _weight_fingerprint(model):
+    """Mean and std of a few parameters, to tell a real sync from a silent no-op."""
+    if not os.environ.get("RLINF_WM_TRACE"):
+        return None
+    state = model.state_dict()
+    out = {}
+    for key in _FINGERPRINT_KEYS:
+        tensor = state.get(key)
+        if tensor is not None:
+            tensor = tensor.detach().float()
+            out[key] = f"mean={tensor.mean():.6f} std={tensor.std():.6f}"
+    return out
 
 
 class MultiStepRolloutWorker(Worker):
@@ -663,7 +687,13 @@ class MultiStepRolloutWorker(Worker):
                 send=send_func,
             )
 
+        before = _weight_fingerprint(self.hf_model)
         applied_version = await self.weight_syncer.apply(self.hf_model, recv_func)
+        after = _weight_fingerprint(self.hf_model)
+        if before is not None:
+            for key in before:
+                if before[key] != after[key]:
+                    self.log_info(f"[sync] {key}: {before[key]} -> {after[key]}")
         self.version = applied_version
         if self.finished_episodes is None:
             self.finished_episodes = (
