@@ -106,8 +106,14 @@ class WorldModelEnv:
         self.update_reset_state_ids()
 
         # Generation geometry is a property of the model, so it comes from the backend.
+        backend_kwargs = {}
+        if backend == "remote":
+            backend_kwargs = {
+                "client_rank": seed_offset,
+                "num_clients": total_num_processes,
+            }
         self.backend: WorldModelBackend = self._backend_cls(
-            self.cfg, self._get_runtime_device()
+            self.cfg, self._get_runtime_device(), **backend_kwargs
         )
         self.chunk = self.backend.chunk  # Ta
         self.condition_frame_length = self.backend.condition_frame_length  # To
@@ -229,16 +235,19 @@ class WorldModelEnv:
         infos["episode"] = episode_info
         return infos
 
-    def _calc_step_reward(self, chunk_rewards):
+    def _calc_step_reward(self, chunk_rewards, valid=None):
         """Calculate step reward"""
+        if valid is None:
+            valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         reward_diffs = torch.zeros(
             (self.num_envs, self.chunk), dtype=torch.float32, device=self.device
         )
         for i in range(self.chunk):
-            reward_diffs[:, i] = (
-                self.cfg.reward_coef * chunk_rewards[:, i] - self.prev_step_reward
+            current_reward = self.cfg.reward_coef * chunk_rewards[:, i]
+            reward_diffs[valid, i] = (
+                current_reward[valid] - self.prev_step_reward[valid]
             )
-            self.prev_step_reward = self.cfg.reward_coef * chunk_rewards[:, i]
+            self.prev_step_reward[valid] = current_reward[valid]
 
         if self.use_rel_reward:
             return reward_diffs
@@ -500,27 +509,40 @@ class WorldModelEnv:
             "step is not implemented for world-model envs, use chunk_step instead"
         )
 
-    def _infer_next_chunk_rewards(self):
+    def _infer_next_chunk_rewards(self, valid=None):
         """Predict the reward of the chunk just generated."""
         if self.reward_model is None:
             raise ValueError("Reward model is not loaded")
+        if valid is None:
+            valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        rewards = torch.zeros(
+            self.num_envs, self.chunk, dtype=torch.float32, device=self.device
+        )
+        if not valid.any():
+            return rewards
 
         num_envs, c, v, t, h, w = self.current_obs.shape
         # [num_envs, T, 3, v, h, w], then the chunk's own frames only
-        chunk_obs = self.current_obs.permute(0, 3, 1, 2, 4, 5)[:, -self.chunk :]
+        chunk_obs = self.current_obs[valid].permute(0, 3, 1, 2, 4, 5)[:, -self.chunk :]
         chunk_obs = (
-            chunk_obs.reshape(self.num_envs * self.chunk, 3, v, h, w)
-            .squeeze(2)  # [num_envs * chunk, 3, h, w]
+            chunk_obs.reshape(valid.sum().item() * self.chunk, 3, v, h, w)
+            .squeeze(2)
             .to(self.device)
         )
 
         instructions = self._reward_instructions()
+        if instructions is not None:
+            instructions = np.asarray(instructions, dtype=object).reshape(
+                self.num_envs, self.chunk
+            )[valid.cpu().numpy()]
+            instructions = instructions.reshape(-1).tolist()
         if instructions is None:
-            rewards = self.reward_model.predict_rew(chunk_obs)
+            valid_rewards = self.reward_model.predict_rew(chunk_obs)
         else:
-            rewards = self.reward_model.predict_rew(chunk_obs, instructions)
+            valid_rewards = self.reward_model.predict_rew(chunk_obs, instructions)
 
-        return rewards.reshape(self.num_envs, self.chunk)
+        rewards[valid] = valid_rewards.reshape(-1, self.chunk)
+        return rewards
 
     def _infer_next_chunk_frames(self, actions):
         """Advance the world model by one action chunk."""
@@ -530,10 +552,12 @@ class WorldModelEnv:
         )
 
         # The new frames only, [num_envs, C, T, H, W] in [-1, 1]; T follows the model.
-        videos = self.backend.generate(env_ids=range(num_envs), actions=actions)
+        generation = self.backend.generate(env_ids=range(num_envs), actions=actions)
 
         # Reshape to match current_obs format: [num_envs, C, 1, T, H, W]
-        x_samples = videos.unsqueeze(2).to(self.device, dtype=self.current_obs.dtype)
+        x_samples = generation.frames.unsqueeze(2).to(
+            self.device, dtype=self.current_obs.dtype
+        )
 
         # Update current observation: append new generated frames to the time dimension
         self.current_obs = torch.cat([self.current_obs, x_samples], dim=3)
@@ -542,6 +566,7 @@ class WorldModelEnv:
         max_frames = self.condition_frame_length + self.chunk
         if self.current_obs.shape[3] > max_frames:
             self.current_obs = self.current_obs[:, :, :, -max_frames:, :, :]
+        return generation.valid.to(self.device), generation.errors
 
     def _wrap_obs(self):
         """Wrap observation to match libero_env format"""
@@ -607,18 +632,19 @@ class WorldModelEnv:
     def chunk_step(self, policy_output_action):
         """Advance one action chunk: [num_envs, chunk, action_dim]."""
         self.onload()
-        self._infer_next_chunk_frames(policy_output_action)
+        valid, generation_errors = self._infer_next_chunk_frames(policy_output_action)
 
         # Update elapsed steps (incremented after inference)
-        self._elapsed_steps += self.chunk
+        self._elapsed_steps += valid.to(self._elapsed_steps.dtype) * self.chunk
 
         # Read the last frame from self.current_obs
         extracted_obs = self._wrap_obs()
 
-        chunk_rewards = self._infer_next_chunk_rewards()
-        chunk_rewards_tensors = self._calc_step_reward(chunk_rewards)
+        chunk_rewards = self._infer_next_chunk_rewards(valid)
+        chunk_rewards_tensors = self._calc_step_reward(chunk_rewards, valid)
 
         estimated_success = self._estimate_success_from_rewards(chunk_rewards)
+        estimated_success &= valid
 
         # Create terminations tensor: success is marked at the last step of chunk
         raw_chunk_terminations = torch.zeros(
@@ -629,6 +655,7 @@ class WorldModelEnv:
         raw_chunk_truncations = torch.zeros(
             self.num_envs, self.chunk, dtype=torch.bool, device=self.device
         )
+        raw_chunk_truncations[~valid] = True
         truncations = self.elapsed_steps >= self.cfg.max_episode_steps
 
         if truncations.any():
@@ -651,6 +678,9 @@ class WorldModelEnv:
             )
             # reset() returns a fresh infos; the step reported is still the one that ended.
             infos["episode"] = episode_info
+
+        infos["transition_valid"] = valid[:, None].expand(-1, self.chunk)
+        infos["world_model_errors"] = generation_errors
 
         chunk_terminations = torch.zeros_like(raw_chunk_terminations)
         chunk_terminations[:, -1] = past_terminations

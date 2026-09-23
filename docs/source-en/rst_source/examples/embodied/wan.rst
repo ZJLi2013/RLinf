@@ -271,6 +271,46 @@ OpenVLA-OFT + GRPO uses ``examples/embodiment/config/wan_libero_spatial_grpo_ope
 
    bash examples/embodiment/run_embodiment.sh wan_libero_spatial_grpo_openvlaoft
 
+Optional external WoVR serving
+-------------------------------
+
+The local ``wan`` backend loads one world-model replica in every env worker. The optional
+``remote`` backend moves generation to standalone WoVR processes while reward inference and
+episode bookkeeping remain in ``WorldModelEnv``.
+
+Start a WoVR server:
+
+.. code-block:: bash
+
+   HIP_VISIBLE_DEVICES=0 python -m rlinf.envs.sim.world_model.server.wovr \
+     --checkpoint /path/to/RLinf-Wan-LIBERO-Spatial \
+     --port 8021 \
+     --max-batch 16
+
+Select the independent remote env recipe when launching training:
+
+.. code-block:: bash
+
+   export EMBODIED_PATH="$(pwd)/examples/embodiment"
+   export ROBOT_PLATFORM=LIBERO
+   python examples/embodiment/train_embodied_agent.py \
+     --config-path "$EMBODIED_PATH/config" \
+     --config-name wan_libero_spatial_grpo_openvlaoft \
+     +env@env.train=wan_libero_spatial_remote \
+     env.train.wan_wm_hf_ckpt_path=/path/to/RLinf-Wan-LIBERO-Spatial \
+     env.train.remote.server_urls='[http://127.0.0.1:8021]'
+
+``server_urls`` statically maps env ranks to endpoints. For example, four env ranks and four
+URLs map rank ``i`` to URL ``i``; four ranks and two URLs map ranks ``0,1`` to the first URL
+and ranks ``2,3`` to the second. Start each endpoint separately before training.
+
+The client checks service geometry and raw encoding before opening sessions. Requests and
+responses use lossless arrays, and shared-batch retries preserve batch membership. Exhausted
+failures truncate only the affected slots and mask their transitions from training.
+The server does not aggregate requests across clients or cache in-flight generations, so a
+timeout retry can repeat compute for the same request ID. ``enable_kir`` remains disabled in
+the remote recipe.
+
 Visualization and Results
 -------------------------
 

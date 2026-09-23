@@ -58,6 +58,43 @@ from rlinf.utils.utils import (
 )
 
 
+def _reward_filter_by_group(
+    rewards: torch.Tensor,
+    loss_mask: torch.Tensor | None,
+    group_size: int,
+    lower_bound: float,
+    upper_bound: float,
+) -> torch.Tensor:
+    n_chunk_step, batch_size, _ = rewards.shape
+    trajectory_rewards = rewards.transpose(0, 1).reshape(batch_size, -1)
+    if loss_mask is None:
+        trajectory_valid = torch.ones(
+            batch_size, dtype=torch.bool, device=rewards.device
+        )
+    else:
+        if loss_mask.shape[-1] == 1 and rewards.shape[-1] != 1:
+            loss_mask = loss_mask.expand_as(rewards)
+        flat_mask = loss_mask.transpose(0, 1).reshape(batch_size, -1)
+        trajectory_valid = flat_mask.any(dim=-1)
+        trajectory_rewards = trajectory_rewards * flat_mask
+
+    grouped_rewards = trajectory_rewards.sum(dim=-1).reshape(-1, group_size)
+    grouped_valid = trajectory_valid.reshape(-1, group_size)
+    valid_count = grouped_valid.sum(dim=-1)
+    group_mean = (grouped_rewards * grouped_valid).sum(dim=-1) / valid_count.clamp(
+        min=1
+    )
+    keep_group = (
+        (valid_count > 0) & (group_mean >= lower_bound) & (group_mean <= upper_bound)
+    )
+    return (
+        keep_group.repeat_interleave(group_size)
+        .unsqueeze(0)
+        .expand(n_chunk_step, -1)
+        .unsqueeze(-1)
+    )
+
+
 class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -216,6 +253,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         rollout_epoch = self.cfg.env.train.rollout_epoch
         rollout_batch = process_nested_dict_for_adv(rollout_batch, rollout_epoch)
 
+        # All-valid batches take the default path unchanged, including its loss aggregation.
+        valids = rollout_batch.get("valids", None)
+        if valids is not None and bool(valids.all()):
+            valids = None
+
         if (
             not self.cfg.env.train.auto_reset
             and not self.cfg.env.train.ignore_terminations
@@ -224,6 +266,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "dones"
             ]  # [n_chunk_step, rollout_epoch x bsz, num_action_chunks]
             loss_mask, loss_mask_sum = compute_loss_mask(dones)
+            if valids is not None:
+                loss_mask = loss_mask & valids.bool()
+                loss_mask_sum = loss_mask.sum(dim=(0, 2), keepdim=True).expand_as(
+                    loss_mask
+                )
 
             if self.cfg.algorithm.reward_type == "chunk_level":
                 loss_mask = loss_mask.any(dim=-1, keepdim=True)
@@ -231,47 +278,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
             rollout_batch["loss_mask"] = loss_mask
             rollout_batch["loss_mask_sum"] = loss_mask_sum
+        elif valids is not None:
+            valid_mask = valids.bool()
+            if self.cfg.algorithm.reward_type == "chunk_level":
+                valid_mask = valid_mask.all(dim=-1, keepdim=True)
+            rollout_batch["loss_mask"] = valid_mask
 
         # filter data by rewards
         if self.cfg.algorithm.get("filter_rewards", False):
-            rewards = rollout_batch[
-                "rewards"
-            ]  # [n_chunk_step, batch, num_action_chunks]
-            if rollout_batch.get("loss_mask", None) is not None:
-                rewards = rewards * rollout_batch["loss_mask"]
-            n_chunk_step, batch_size, num_action_chunks = rewards.shape
-
+            rewards = rollout_batch["rewards"]
             group_size = self.cfg.algorithm.group_size
-            assert batch_size % group_size == 0, (
-                f"batch {batch_size} not divisible by group_size {group_size}"
+            assert rewards.shape[1] % group_size == 0, (
+                f"batch {rewards.shape[1]} not divisible by group_size {group_size}"
             )
-            n_prompts = batch_size // group_size
-
-            # calculate rewards by prompt
-            rewards = rewards.transpose(
-                0, 1
-            )  # [batch, n_chunk_step, num_action_chunks]
-            rewards = rewards.reshape(rewards.shape[0], -1)  # [batch, n_step]
-            reward_matrix = rewards.reshape(
-                n_prompts, group_size, rewards.shape[-1]
-            )  # [n_prompts, group_size, n_step]
-            reward_matrix = reward_matrix.sum(dim=-1)  # [n_prompts, group_size]
-            mean_reward_in_group = reward_matrix.mean(dim=1)  # [n_prompts]
-
-            # mask
-            reward_filter_mask = (
-                mean_reward_in_group >= self.cfg.algorithm.rewards_lower_bound
-            ) & (
-                mean_reward_in_group <= self.cfg.algorithm.rewards_upper_bound
-            )  # [n_prompts]
-
-            # extend mask dimension
-            reward_filter_mask = reward_filter_mask.repeat_interleave(
-                group_size
-            )  # [batch]
-            reward_filter_mask = (
-                reward_filter_mask.unsqueeze(0).expand(n_chunk_step, -1).unsqueeze(-1)
-            )  # [n_chunk_step, batch, 1]
+            reward_filter_mask = _reward_filter_by_group(
+                rewards,
+                rollout_batch.get("loss_mask"),
+                group_size,
+                self.cfg.algorithm.rewards_lower_bound,
+                self.cfg.algorithm.rewards_upper_bound,
+            )
 
             # update loss_mask
             if rollout_batch.get("loss_mask", None) is not None:

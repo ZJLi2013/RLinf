@@ -474,6 +474,9 @@ class EnvWorker(Worker):
                 dones=chunk_dones,
                 terminations=chunk_terminations,
                 truncations=chunk_truncations,
+                valids=(
+                    infos.get("transition_valid") if isinstance(infos, dict) else None
+                ),
                 intervene_actions=intervene_actions,
                 intervene_flags=intervene_flags,
                 rlt_switch_flags=rlt_switch_flags,

@@ -25,7 +25,7 @@ from PIL import Image
 from rlinf.envs.sim.world_model.registry import register_backend
 from rlinf.utils.patcher import Patcher
 
-from . import FrameQueue, autocast
+from . import FrameQueue, WorldModelGeneration, autocast
 from .npu_patches import apply_npu_patches
 
 __all__ = ["WanBackend"]
@@ -178,7 +178,7 @@ class WanBackend:
         self,
         env_ids: Sequence[int],
         actions: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> WorldModelGeneration:
         batch_size = len(env_ids)
         if actions.shape[0] != batch_size:
             raise ValueError(
@@ -213,7 +213,7 @@ class WanBackend:
             video = torch.from_numpy(video)
             videos.append(video.transpose(0, 1))  # [3, T, H, W]
 
-        return torch.stack(videos, dim=0)
+        return WorldModelGeneration.success(torch.stack(videos, dim=0))
 
     def offload(self) -> None:
         self._pipe.vae = self._pipe.vae.to("cpu")

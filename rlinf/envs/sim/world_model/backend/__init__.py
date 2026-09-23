@@ -24,13 +24,32 @@ implementations live in this package, one module each (``wan``, ``opensora``).
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any, ContextManager, Optional, Protocol, Sequence
 
 import torch
 
-__all__ = ["WorldModelBackend", "FrameQueue", "autocast"]
+__all__ = ["WorldModelBackend", "WorldModelGeneration", "FrameQueue", "autocast"]
 
 FrameQueue = Sequence[Sequence[torch.Tensor]]
+
+
+@dataclass
+class WorldModelGeneration:
+    """Frames and per-row validity returned by a backend generation step."""
+
+    frames: torch.Tensor
+    valid: torch.Tensor
+    errors: tuple[Optional[str], ...]
+
+    @classmethod
+    def success(cls, frames: torch.Tensor) -> "WorldModelGeneration":
+        batch_size = frames.shape[0]
+        return cls(
+            frames=frames,
+            valid=torch.ones(batch_size, dtype=torch.bool, device=frames.device),
+            errors=(None,) * batch_size,
+        )
 
 
 def autocast(device: torch.device, dtype: torch.dtype) -> ContextManager:
@@ -81,7 +100,7 @@ class WorldModelBackend(Protocol):
         self,
         env_ids: Sequence[int],
         actions: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> WorldModelGeneration:
         """Advance one action chunk from each session's own condition window.
 
         Args:
@@ -89,9 +108,9 @@ class WorldModelBackend(Protocol):
             actions: ``[B, chunk, action_dim]``, rows in ``env_ids`` order.
 
         Returns:
-            The newly generated frames as ``[B, C, T, H, W]`` in ``[-1, 1]``. ``T``, the
-            device and the dtype are the backend's own; the caller moves the result to
-            where it keeps observations.
+            Generated frames as ``[B, C, T, H, W]`` in ``[-1, 1]``, plus a validity
+            bit and optional error for each batch row. Invalid rows carry placeholders
+            and must not be scored or used for training.
         """
 
     def close_session(self, env_ids: Sequence[int]) -> None:

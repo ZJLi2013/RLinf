@@ -105,16 +105,20 @@ def compute_grpo_advantages(
         torch.Tensor: advantages
     """
     grouped_rewards = rewards.view(-1, group_size)
+    trajectory_valid = loss_mask.bool().any(dim=0).view(-1, group_size)
 
-    grouped_reward_mean = grouped_rewards.mean(dim=-1, keepdim=True).expand_as(
-        grouped_rewards
-    )
-    grouped_reward_std = grouped_rewards.std(dim=-1, keepdim=True).expand_as(
-        grouped_rewards
+    valid_count = trajectory_valid.sum(dim=-1, keepdim=True)
+    grouped_reward_mean = (grouped_rewards * trajectory_valid).sum(
+        dim=-1, keepdim=True
+    ) / valid_count.clamp(min=1)
+    centered = (grouped_rewards - grouped_reward_mean) * trajectory_valid
+    grouped_reward_std = torch.sqrt(
+        centered.square().sum(dim=-1, keepdim=True) / (valid_count - 1).clamp(min=1)
     )
 
     advantages = grouped_rewards - grouped_reward_mean
     advantages = advantages / (grouped_reward_std + 1e-6)
+    advantages = advantages * trajectory_valid
 
     advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
 

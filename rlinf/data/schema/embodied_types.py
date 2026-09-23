@@ -145,6 +145,8 @@ class EnvTransition:
     terminations: torch.Tensor | None = None
     # Time-limit/external truncation mask, bool [B, C].
     truncations: torch.Tensor | None = None
+    # Whether each transition is valid for training, bool [B, C].
+    valids: torch.Tensor | None = None
     # Expert actions for intervened slots, float [B, C, A] or [B, D].
     intervene_actions: torch.Tensor | None = None
     # Environment-side intervention mask, bool [B, C].
@@ -164,6 +166,7 @@ class EnvTransition:
             "dones",
             "terminations",
             "truncations",
+            "valids",
             "intervene_actions",
             "intervene_flags",
             "rlt_switch_flags",
@@ -196,6 +199,7 @@ class EnvTransition:
                 "dones",
                 "terminations",
                 "truncations",
+                "valids",
                 "rewards",
                 "intervene_actions",
                 "intervene_flags",
@@ -621,6 +625,8 @@ class TrajectoryStep:
     truncations: torch.Tensor | None = None
     # Post-action termination flags, bool [B, C].
     terminations: torch.Tensor | None = None
+    # Post-action training validity, bool [B, C].
+    valids: torch.Tensor | None = None
     # Combined environment/model rewards, float [B, C].
     rewards: torch.Tensor | None = None
     # Actor training inputs for the current chunk; leaves start with [B, ...].
@@ -650,6 +656,7 @@ class TrajectoryStep:
             "dones",
             "terminations",
             "truncations",
+            "valids",
             "rewards",
             "versions",
             "initial_dones",
@@ -696,6 +703,7 @@ class TrajectoryStep:
             dones=env.transition.dones,
             truncations=env.transition.truncations,
             terminations=env.transition.terminations,
+            valids=env.transition.valids,
             rewards=rewards,
             forward_inputs=dict(output.forward_inputs),
             versions=output.versions,
@@ -831,6 +839,7 @@ class Trajectory:
     terminations: torch.Tensor | None = None
     truncations: torch.Tensor | None = None
     dones: torch.Tensor | None = None
+    valids: torch.Tensor | None = None
     prev_logprobs: torch.Tensor | None = None
     prev_values: torch.Tensor | None = None
     versions: torch.Tensor | None = None
@@ -861,6 +870,7 @@ class Trajectory:
             "actions",
             "intervene_flags",
             "rewards",
+            "valids",
             "prev_logprobs",
             "versions",
         ):
@@ -1613,6 +1623,11 @@ class EnvOutput:
     def truncations(self) -> torch.Tensor | None:
         """Return time-limit or external truncation flags."""
         return self.transition.truncations
+
+    @property
+    def valids(self) -> torch.Tensor | None:
+        """Return which transitions are valid for training."""
+        return self.transition.valids
 
     @property
     def intervene_actions(self) -> torch.Tensor | None:

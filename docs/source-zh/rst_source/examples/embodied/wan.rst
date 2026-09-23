@@ -267,6 +267,43 @@ OpenVLA-OFT + GRPO 使用 ``examples/embodiment/config/wan_libero_spatial_grpo_o
 
    bash examples/embodiment/run_embodiment.sh wan_libero_spatial_grpo_openvlaoft
 
+可选的外部 WoVR 服务
+----------------------------------------
+
+本地 ``wan`` backend 会在每个 env worker 中加载一份世界模型。可选的 ``remote`` backend
+把生成放到独立 WoVR 进程中，reward 推理和 episode 簿记仍留在 ``WorldModelEnv``。
+
+启动一个 WoVR server：
+
+.. code-block:: bash
+
+   HIP_VISIBLE_DEVICES=0 python -m rlinf.envs.sim.world_model.server.wovr \
+     --checkpoint /path/to/RLinf-Wan-LIBERO-Spatial \
+     --port 8021 \
+     --max-batch 16
+
+训练时选择独立的 remote env recipe：
+
+.. code-block:: bash
+
+   export EMBODIED_PATH="$(pwd)/examples/embodiment"
+   export ROBOT_PLATFORM=LIBERO
+   python examples/embodiment/train_embodied_agent.py \
+     --config-path "$EMBODIED_PATH/config" \
+     --config-name wan_libero_spatial_grpo_openvlaoft \
+     +env@env.train=wan_libero_spatial_remote \
+     env.train.wan_wm_hf_ckpt_path=/path/to/RLinf-Wan-LIBERO-Spatial \
+     env.train.remote.server_urls='[http://127.0.0.1:8021]'
+
+``server_urls`` 将 env rank 静态映射到 endpoint。例如，4 个 env rank 和 4 个 URL
+按 rank ``i`` 对应 URL ``i``；4 个 rank 和 2 个 URL 则将 rank ``0,1`` 映射到第一个
+URL，将 rank ``2,3`` 映射到第二个 URL。训练前需要分别启动各 endpoint。
+
+客户端会在打开 session 前检查服务端几何与 raw 编码。请求和响应使用无损数组；
+shared-batch 重试会保持 batch 成员不变。重试耗尽后只 truncate 失败 slot，并从训练中
+mask 对应 transition。server 不会跨 client 聚合请求，也不会缓存正在执行的生成，因此
+超时重试可能为同一个 request ID 重复计算。remote recipe 中 ``enable_kir`` 保持关闭。
+
 可视化与结果
 ----------------------------------------
 

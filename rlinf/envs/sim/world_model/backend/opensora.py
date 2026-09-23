@@ -29,7 +29,7 @@ from opensora.utils.misc import to_torch_dtype
 from rlinf.envs.sim.world_model.registry import register_backend
 from rlinf.envs.utils import recursive_to_device
 
-from . import FrameQueue, autocast
+from . import FrameQueue, WorldModelGeneration, autocast
 
 __all__ = ["OpenSoraBackend"]
 
@@ -188,7 +188,7 @@ class OpenSoraBackend:
         self,
         env_ids: Sequence[int],
         actions: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> WorldModelGeneration:
         batch_size = len(env_ids)
         if actions.shape[0] != batch_size:
             raise ValueError(
@@ -246,8 +246,10 @@ class OpenSoraBackend:
                     queue.append(latent)
 
             if self.is_vae_v1_2:
-                return self.vae.decode(pred_latents, num_frames=12)
-            return self.vae.decode(pred_latents)
+                frames = self.vae.decode(pred_latents, num_frames=12)
+            else:
+                frames = self.vae.decode(pred_latents)
+            return WorldModelGeneration.success(frames)
 
     def offload(self) -> None:
         self.vae = self.vae.to("cpu")
