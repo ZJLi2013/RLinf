@@ -1,0 +1,44 @@
+# RLinf PI0.5 BF16 policy for the PhyAI hybrid engine on AMD ROCm GPUs.
+#
+# Same rules as phyai.yaml with the FlashInfer rows replaced: FlashInfer does
+# not build on ROCm, so paged attention uses the SDPA backend and exact GELU
+# uses the Torch kernels.
+#
+# The SDPA paged backend cannot replay one captured graph across PI0.5's prefix
+# buckets, so the engine runs eager.
+
+use_cuda_graph: false
+
+kernel_config:
+  schema: phyai.kernel/v1
+  profile: static
+  defaults:
+    fallback: error
+
+  overrides:
+    - id: pi05-rlinf-paged-sdpa
+      priority: 100
+      match:
+        op: attention_paged
+        model.family: pi05
+      use: sdpa.attention_paged
+
+    - id: pi05-rlinf-exact-geglu
+      priority: 100
+      match:
+        op: activation
+        model.family: pi05
+        attrs:
+          activation: gelu
+          gated: true
+      use: torch.activation.gelu_and_mul
+
+    - id: pi05-rlinf-exact-gelu
+      priority: 100
+      match:
+        op: activation
+        model.family: pi05
+        attrs:
+          activation: gelu
+          gated: false
+      use: torch.activation.gelu
