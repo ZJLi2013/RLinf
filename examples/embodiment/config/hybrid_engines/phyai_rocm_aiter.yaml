@@ -1,0 +1,40 @@
+# RLinf PI0.5 BF16 policy for the PhyAI hybrid engine on AMD ROCm GPUs with aiter.
+#
+# Same rules as phyai.yaml with the FlashInfer rows replaced by the aiter rows
+# PhyAI selects on AMD (phyai >= 309002e with aiter installed). The aiter paged
+# backend takes static sequence bounds, so one captured graph replays across
+# PI0.5's prefix buckets and the engine runs with CUDA Graph.
+
+kernel_config:
+  schema: phyai.kernel/v1
+  profile: static
+  defaults:
+    fallback: error
+
+  overrides:
+    - id: pi05-rlinf-paged-aiter
+      priority: 100
+      match:
+        op: attention_paged
+        model.family: pi05
+      use: aiter.attention_paged
+
+    - id: pi05-rlinf-exact-geglu
+      priority: 100
+      match:
+        op: activation
+        model.family: pi05
+        attrs:
+          activation: gelu
+          gated: true
+      use: aiter.activation.gelu_and_mul
+
+    - id: pi05-rlinf-exact-gelu
+      priority: 100
+      match:
+        op: activation
+        model.family: pi05
+        attrs:
+          activation: gelu
+          gated: false
+      use: torch.activation.gelu
